@@ -12,7 +12,10 @@ class ArrivalGenerator(sim.Component):
 
     def process(self):
         while True: # infinite loop to keep generating patients
-            esi_level = random.randint(1, 5) # randomly assigns an ESI level between 1 and 5 to the arriving patient
+            esi_level = random.choices(
+                [1, 2, 3, 4, 5],
+                weights=[1, 2, 3, 4, 5], # example distribution of ESI levels, can be adjusted based on actual data
+            )[0]
 
             Patient(
                 triage = self.triage,
