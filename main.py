@@ -10,18 +10,30 @@ sim.random_seed(seed)
 from simulation.environment import create_environment
 from simulation.arrival_generator import ArrivalGenerator
 from simulation.esi import ESI
-from config import SIMULATION_TIME
+from simulation.data_reader import ERDataReader
+from config import SIMULATION_TIME, DATASET_PATH
 
 print("Seed: ", seed)
 
-env, triage, providers, beds = create_environment() # creates the simulation environment and resources
-esi_tracker = ESI() # creates instance of ESI tracker to show patient distribution across ESI levels
+env, triage, providers, beds = create_environment()
+esi_tracker = ESI()
+
+data = None
+
+if DATASET_PATH:
+    reader = ERDataReader(DATASET_PATH)
+    data = reader.load_and_prepare()
+    print("Dataset loaded successfully.")
+else:
+    print("No dataset path provided. Using synthetic random generation.")
+
 ArrivalGenerator(
-    triage = triage,
-    providers = providers,
-    beds = beds,
-    metrics = esi_tracker
+    triage=triage,
+    providers=providers,
+    beds=beds,
+    metrics=esi_tracker,
+    data=data
 )
 
-env.run(till = SIMULATION_TIME) # runs the simulation based on the specified simulation time from config.py
-esi_tracker.report() # prints the report of patient distribution across ESI levels and average wait times
+env.run(till=SIMULATION_TIME)
+esi_tracker.report()
