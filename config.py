@@ -1,7 +1,3 @@
-'''
-the numbers' time units are in minutes
-'''
-
 NUM_PROVIDERS = 4
 NUM_BEDS = 10
 
@@ -9,3 +5,5 @@ MEAN_ARRIVAL_TIME = 8
 MEAN_TRIAGE_TIME = 3
 MEAN_SERVICE_TIME = 20
 SIMULATION_TIME = 5000
+
+DATASET_PATH = "data/ed2022-stata.dta"
