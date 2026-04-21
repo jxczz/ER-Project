@@ -1,11 +1,12 @@
 import salabim as sim
 import random
-from config import MEAN_ARRIVAL_TIME, MEAN_SERVICE_TIME
+from config import MEAN_ARRIVAL_TIME
 from simulation.patient import Patient
 
 
 class ArrivalGenerator(sim.Component):
     def setup(self, triage, providers, beds, metrics, data=None):
+        # Shared resources and metrics sink that each Patient will use.
         self.triage = triage
         self.providers = providers
         self.beds = beds
@@ -13,43 +14,26 @@ class ArrivalGenerator(sim.Component):
         self.data = data
 
     def process(self):
+        # Keep generating patients over time until the environment stops.
         while True:
             if self.data is not None:
-                esi_levels, esi_weights, interarrival_times, service_times_by_esi = self.data
-
-                esi_level = random.choices(
-                    population=esi_levels,
-                    weights=esi_weights,
-                    k=1
-                )[0]
-
-                if esi_level in service_times_by_esi and service_times_by_esi[esi_level]:
-                    sampled_service_time = random.choice(service_times_by_esi[esi_level])
-                else:
-                    sampled_service_time = MEAN_SERVICE_TIME
-
-                if interarrival_times:
-                    sampled_interarrival = random.choice(interarrival_times)
-                else:
-                    sampled_interarrival = MEAN_ARRIVAL_TIME
+                # ArrivalGenerator only controls *when* patients arrive.
+                # ESI assignment happens during triage inside Patient.
+                _esi_levels, _esi_weights, interarrival_times, _service_times_by_esi = self.data
+                sampled_interarrival = random.choice(interarrival_times) if interarrival_times else MEAN_ARRIVAL_TIME
 
             else:
-                esi_level = random.choices(
-                    [1, 2, 3, 4, 5],
-                    weights=[1, 2, 3, 4, 5],
-                    k=1
-                )[0]
-
-                sampled_service_time = random.expovariate(1.0 / MEAN_SERVICE_TIME)
+                # Synthetic mode: exponential interarrival times around the configured mean.
                 sampled_interarrival = random.expovariate(1.0 / MEAN_ARRIVAL_TIME)
 
+            # Create a Patient component.
             Patient(
                 triage=self.triage,
                 providers=self.providers,
                 beds=self.beds,
                 metrics=self.metrics,
-                esi=esi_level,
-                service_time=sampled_service_time
+                data=self.data
             )
 
+            # Wait until the next patient arrives (simulated time).
             yield self.hold(sampled_interarrival)

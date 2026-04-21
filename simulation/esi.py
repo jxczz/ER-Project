@@ -1,3 +1,5 @@
+import statistics
+
 class ESI:
     def __init__(self):
         self.wait_times = {1: [], 2: [], 3: [], 4: [], 5: []} # creates a dictionary of lists to store wait times for each ESI level
@@ -8,6 +10,21 @@ class ESI:
     def report(self):
         for level in self.wait_times:
             if self.wait_times[level]: # if there are wait times recorded for this ESI level
-                count = len(self.wait_times[level]) # counts how many patients are in this ESI level
-                average_wait = sum(self.wait_times[level]) / len(self.wait_times[level]) # calculate average wait time
-                print("ESI Level: ", level, "Patients: ", count, "Average Wait Time: ", round(average_wait, 2), "minutes") # print average wait time for this ESI level
+                waits = self.wait_times[level]
+
+                count = len(waits) # counts how many patients are in this ESI level
+                average_wait = sum(waits) / count # calculate average wait time
+                median_wait = statistics.median(waits)
+
+                print(
+                    "ESI Level: ",
+                    level,
+                    "Patients: ",
+                    count,
+                    "Avg: ",
+                    round(average_wait, 2),
+                    "min",
+                    "Median: ",
+                    round(median_wait, 2),
+                    "min",
+                )
