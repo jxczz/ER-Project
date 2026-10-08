@@ -20,7 +20,7 @@ from config import SIMULATION_TIME, DATASET_PATH, ANIMATE
 print("Seed: ", seed)
 
 # Create the environment and shared resources used by all patients.
-env, triage, providers, beds = create_environment()
+env, nurses, providers, beds, testing = create_environment()
 
 if ANIMATE:
     from simulation.animation import setup_animation
@@ -50,9 +50,10 @@ else:
 
 # This continuously spawns Patient components over time.
 ArrivalGenerator(
-    triage=triage,
+    nurses=nurses,
     providers=providers,
     beds=beds,
+    testing=testing,
     metrics=esi_tracker,
     data=data
 )
