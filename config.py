@@ -1,6 +1,11 @@
-# Staffing. Nurses do triage, treatment, and discharge/transfer; providers do examination and diagnosis.
-NUM_NURSES = 6
-NUM_PROVIDERS = 3
+# Staffing. Each stage has its own pool; staff are never shared between stages.
+STAFF = {
+    "triage": 2,       # triage nurses
+    "exam": 2,         # examining providers
+    "diagnosis": 2,    # diagnosing providers
+    "treatment": 4,    # treatment nurses
+    "disposition": 3,  # discharge/transfer staff
+}
 NUM_BEDS = 25
 
 # These are in minutes and can be adjusted at any time if no dataset is provided.
@@ -24,7 +29,7 @@ TEST_TYPES = {
     },
 }
 
-# Treatment after diagnosis (nurse + bed). Keyed by ESI 1..5.
+# Treatment after diagnosis (treatment nurse + bed). Keyed by ESI 1..5.
 TREATMENT_PROBABILITY = {1: 1.0, 2: 0.9, 3: 0.7, 4: 0.4, 5: 0.2}
 MEAN_TREATMENT_TIME = {1: 90, 2: 60, 3: 40, 4: 20, 5: 10}
 
@@ -33,11 +38,6 @@ ADMIT_PROBABILITY = {1: 0.8, 2: 0.5, 3: 0.2, 4: 0.03, 5: 0.01}
 MEAN_BOARDING_TIME = 120
 MEAN_DISCHARGE_TIME = 15
 MEAN_TRANSFER_TIME = 25
-
-# Shared-pool task ordering: lower rank is served first, then lower ESI within the same task.
-# Finishing patients first frees beds; triage is FIFO since acuity is unknown until it is done.
-NURSE_TASK_RANK = {"disposition": 0, "treatment": 1, "triage": 2}
-PROVIDER_TASK_RANK = {"diagnosis": 0, "exam": 1}
 
 # Most patients are ESI 3/4, barely any are ESI 1.
 ESI_WEIGHTS_SYNTHETIC = [3, 12, 40, 35, 10]  # ESI 1..5

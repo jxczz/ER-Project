@@ -5,9 +5,9 @@ from simulation.diagnostic_test import DiagnosticTest
 
 
 class Patient(sim.Component):
-    def setup(self, nurses, providers, beds, testing, metrics, esi=None, data=None):
-        self.nurses = nurses
-        self.providers = providers
+    def setup(self, staff, beds, testing, metrics, esi=None, data=None):
+        # One staff pool per stage, keyed by stage name.
+        self.staff = staff
         self.beds = beds
         self.testing = testing
         self.metrics = metrics
@@ -103,12 +103,9 @@ class Patient(sim.Component):
         if getattr(cfg, "ANIMATE", False):
             yield self.hold(getattr(cfg, "ANIMATION_STAGE_PAUSE", 0))
 
-    def _priority(self, ranks, task, by_esi=True):
-        # Lower value = served first: task rank first, then ESI (ESI 1 most critical) within a task.
-        return ranks[task] * 10 + (self.esi if by_esi else 0)
-
-    def _acquire(self, stage, wait_queue, resource, priority):
+    def _acquire(self, stage, wait_queue, resource, priority=0):
         # Request a resource and record how long this stage's queue took.
+        # Lower priority value = served first, so ESI 1 (most critical) wins.
         yield from self._enter_stage(wait_queue)
         requested_at = self.env.now()
         yield self.request(resource, request_priority=priority)
@@ -132,29 +129,22 @@ class Patient(sim.Component):
         arrival_time = self.env.now()
         self._anim_queue = None
 
-        # TRIAGE (nurse). FIFO among triage requests: acuity is not known until triage is done.
-        yield from self._acquire(
-            "triage", self.env.q_wait_triage, self.nurses,
-            self._priority(cfg.NURSE_TASK_RANK, "triage", by_esi=False),
-        )
+        # TRIAGE (triage nurse). FIFO: acuity is not known until triage is done.
+        yield from self._acquire("triage", self.env.q_wait_triage, self.staff["triage"])
         yield from self._enter_stage(self.env.q_in_triage)
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_TRIAGE_TIME))
-        self.release(self.nurses)
+        self.release(self.staff["triage"])
 
         # BED. Held from here until discharge/transfer; every later stage happens in the bed.
-        # Lower priority value = served first, so ESI 1 (most critical) wins.
         yield from self._acquire("bed", self.env.q_wait_bed, self.beds, self.esi)
 
-        # EXAMINATION (provider)
-        yield from self._acquire(
-            "exam", self.env.q_wait_exam, self.providers,
-            self._priority(cfg.PROVIDER_TASK_RANK, "exam"),
-        )
+        # EXAMINATION (examining provider)
+        yield from self._acquire("exam", self.env.q_wait_exam, self.staff["exam"], self.esi)
         yield from self._enter_stage(self.env.q_in_exam)
         # Door-to-provider time.
         self.metrics.record_wait_time(self.esi, self.env.now() - arrival_time)
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXAM_TIME))
-        self.release(self.providers)
+        self.release(self.staff["exam"])
 
         # TESTING. Tests are ordered as the exam finishes; the patient waits in bed for all results.
         self._order_tests()
@@ -164,38 +154,30 @@ class Patient(sim.Component):
             yield self.wait(*[test.done for test in self.tests], all=True)
             self.metrics.record_stage_wait("test results", self.esi, self.env.now() - ordered_at)
 
-        # DIAGNOSIS (provider). Requires the bed and all test results.
-        yield from self._acquire(
-            "diagnosis", self.env.q_wait_diagnosis, self.providers,
-            self._priority(cfg.PROVIDER_TASK_RANK, "diagnosis"),
-        )
+        # DIAGNOSIS (diagnosing provider). Requires the bed and all test results.
+        yield from self._acquire("diagnosis", self.env.q_wait_diagnosis, self.staff["diagnosis"], self.esi)
         yield from self._enter_stage(self.env.q_in_diagnosis)
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_DIAGNOSIS_TIME))
-        self.release(self.providers)
+        self.release(self.staff["diagnosis"])
 
-        # TREATMENT (nurse), if needed.
+        # TREATMENT (treatment nurse), if needed.
         if random.random() < cfg.TREATMENT_PROBABILITY[self.esi]:
-            yield from self._acquire(
-                "treatment", self.env.q_wait_treatment, self.nurses,
-                self._priority(cfg.NURSE_TASK_RANK, "treatment"),
-            )
+            yield from self._acquire("treatment", self.env.q_wait_treatment, self.staff["treatment"], self.esi)
             yield from self._enter_stage(self.env.q_in_treatment)
             yield self.hold(random.expovariate(1.0 / cfg.MEAN_TREATMENT_TIME[self.esi]))
-            self.release(self.nurses)
+            self.release(self.staff["treatment"])
 
         # DISPOSITION. Admitted/transferred patients board in their ED bed first.
         self.admitted = random.random() < cfg.ADMIT_PROBABILITY[self.esi]
         if self.admitted:
             yield from self._enter_stage(self.env.q_boarding)
             yield self.hold(random.expovariate(1.0 / cfg.MEAN_BOARDING_TIME))
-        yield from self._acquire(
-            "disposition", self.env.q_wait_disposition, self.nurses,
-            self._priority(cfg.NURSE_TASK_RANK, "disposition"),
-        )
+        # Discharge/transfer staff.
+        yield from self._acquire("disposition", self.env.q_wait_disposition, self.staff["disposition"], self.esi)
         yield from self._enter_stage(self.env.q_in_disposition)
         mean_time = cfg.MEAN_TRANSFER_TIME if self.admitted else cfg.MEAN_DISCHARGE_TIME
         yield self.hold(random.expovariate(1.0 / mean_time))
-        self.release(self.nurses)
+        self.release(self.staff["disposition"])
         self.release(self.beds)
 
         # Leave the last queue so the box disappears properly

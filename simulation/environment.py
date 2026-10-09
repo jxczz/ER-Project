@@ -1,5 +1,5 @@
 import salabim as sim
-from config import NUM_NURSES, NUM_PROVIDERS, NUM_BEDS, TEST_TYPES
+from config import STAFF, NUM_BEDS, TEST_TYPES
 
 # Animation queues in patient-flow order: (attribute name, label).
 STAGE_QUEUES = [
@@ -26,8 +26,11 @@ def create_environment():
     for name, _label in STAGE_QUEUES:
         setattr(env, name, sim.Queue(name))
 
-    nurses = sim.Resource("nurses", capacity = NUM_NURSES) # triage, treatment, discharge/transfer
-    providers = sim.Resource("providers", capacity = NUM_PROVIDERS) # examination, diagnosis
+    # One staff pool per stage, e.g. {"triage": Resource, "exam": Resource, ...}.
+    staff = {
+        stage: sim.Resource(f"{stage}_staff", capacity = capacity)
+        for stage, capacity in STAFF.items()
+    }
     beds = sim.Resource("beds", capacity = NUM_BEDS) # creating resource for beds, capacity based on config.py
     # One pool per test type, e.g. {"lab": Resource, "imaging": Resource}.
     testing = {
@@ -35,4 +38,4 @@ def create_environment():
         for name, spec in TEST_TYPES.items()
     }
 
-    return env, nurses, providers, beds, testing # returning the environment and resources to be used in the simulation
+    return env, staff, beds, testing # returning the environment and resources to be used in the simulation

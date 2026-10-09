@@ -56,10 +56,9 @@ class PatientWorkflowTests(unittest.TestCase):
         ))
         self.patch(patch("simulation.patient.random.expovariate", side_effect=lambda rate: 1 / rate))
 
-        with patch.multiple(
-            environment, NUM_NURSES=1, NUM_PROVIDERS=1, NUM_BEDS=1, TEST_TYPES=self.test_types
-        ):
-            self.env, self.nurses, self.providers, self.beds, self.testing = environment.create_environment()
+        staff = dict.fromkeys(("triage", "exam", "diagnosis", "treatment", "disposition"), 1)
+        with patch.multiple(environment, STAFF=staff, NUM_BEDS=1, TEST_TYPES=self.test_types):
+            self.env, self.staff, self.beds, self.testing = environment.create_environment()
         self.metrics = ESI()
         self.animation_queues = [getattr(self.env, name) for name, _label in environment.STAGE_QUEUES]
 
@@ -75,8 +74,7 @@ class PatientWorkflowTests(unittest.TestCase):
 
     def patient(self, esi=3, **kwargs):
         return Patient(
-            nurses=self.nurses,
-            providers=self.providers,
+            staff=self.staff,
             beds=self.beds,
             testing=self.testing,
             metrics=self.metrics,
@@ -90,16 +88,17 @@ class PatientWorkflowTests(unittest.TestCase):
             held_resource=resource, hold_duration=duration, env=self.env, **kwargs
         )
 
-    def assert_claims(self, patient, *, nurse=False, provider=False, bed=False):
-        self.assertEqual(patient in self.nurses.claimers(), nurse)
-        self.assertEqual(patient in self.providers.claimers(), provider)
+    def assert_claims(self, patient, *, staff=None, bed=False):
+        # `staff` names the one stage pool the patient should be holding, if any.
+        for stage, pool in self.staff.items():
+            self.assertEqual(patient in pool.claimers(), stage == staff, stage)
         self.assertEqual(patient in self.beds.claimers(), bed)
 
     def assert_departed(self, *patients):
         for patient in patients:
             self.assertIsNone(patient._anim_queue)
             self.assertEqual(patient.queues(), set())
-        resources = [self.nurses, self.providers, self.beds, *self.testing.values()]
+        resources = [*self.staff.values(), self.beds, *self.testing.values()]
         for resource in resources:
             self.assertEqual(resource.claimed_quantity(), 0)
             self.assertEqual(len(resource.requesters()), 0)
@@ -113,9 +112,9 @@ class PatientWorkflowTests(unittest.TestCase):
 
         # Triage 0-1 (nurse), bed at 1, exam 1-3 (provider).
         self.env.run(till=0.5)
-        self.assert_claims(patient, nurse=True)
+        self.assert_claims(patient, staff="triage")
         self.env.run(till=2)
-        self.assert_claims(patient, provider=True, bed=True)
+        self.assert_claims(patient, staff="exam", bed=True)
         self.assertEqual(self.metrics.wait_times[3], [1.0])
 
         # Tests ordered at 3 run in parallel on their own pools: lab 3-7, imaging 3-11.
@@ -126,7 +125,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertIn(patient.tests[1], self.testing["imaging"].claimers())
         # Bed held during testing; the free provider is not requested until results are back.
         self.assert_claims(patient, bed=True)
-        self.assertNotIn(patient, self.providers.requesters())
+        self.assertNotIn(patient, self.staff["diagnosis"].requesters())
         self.assertIn(patient, self.env.q_testing)
         self.env.run(till=8)
         self.assertTrue(patient.tests[0].done())
@@ -135,9 +134,9 @@ class PatientWorkflowTests(unittest.TestCase):
 
         # Diagnosis 11-12 (provider), treatment 12-14 (nurse).
         self.env.run(till=11.5)
-        self.assert_claims(patient, provider=True, bed=True)
+        self.assert_claims(patient, staff="diagnosis", bed=True)
         self.env.run(till=13)
-        self.assert_claims(patient, nurse=True, bed=True)
+        self.assert_claims(patient, staff="treatment", bed=True)
         self.assertIn(patient, self.env.q_in_treatment)
 
         # Boarding 14-30 holds only the bed; transfer 30-32 (nurse).
@@ -145,7 +144,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_claims(patient, bed=True)
         self.assertIn(patient, self.env.q_boarding)
         self.env.run(till=31)
-        self.assert_claims(patient, nurse=True, bed=True)
+        self.assert_claims(patient, staff="disposition", bed=True)
         self.assertEqual(self.metrics.lengths_of_visit[3], [])
 
         self.env.run(till=32.1)
@@ -159,10 +158,10 @@ class PatientWorkflowTests(unittest.TestCase):
 
         # Triage 0-1, exam 1-3, diagnosis 3-4, discharge 4-5.
         self.env.run(till=3.5)
-        self.assert_claims(patient, provider=True, bed=True)
+        self.assert_claims(patient, staff="diagnosis", bed=True)
         self.assertIn(patient, self.env.q_in_diagnosis)
         self.env.run(till=4.5)
-        self.assert_claims(patient, nurse=True, bed=True)
+        self.assert_claims(patient, staff="disposition", bed=True)
         self.assertIn(patient, self.env.q_in_disposition)
 
         self.env.run(till=6)
@@ -185,7 +184,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertIn(occupant, self.beds.claimers())
 
         self.env.run(till=8.1)
-        self.assert_claims(later, provider=True, bed=True)
+        self.assert_claims(later, staff="exam", bed=True)
         self.assertIn(earlier, self.beds.requesters())
 
         self.env.run(till=30)
@@ -201,7 +200,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertIn(earlier, self.beds.requesters())
         self.assertIn(later, self.beds.requesters())
         self.env.run(till=8.1)
-        self.assert_claims(earlier, provider=True, bed=True)
+        self.assert_claims(earlier, staff="exam", bed=True)
         self.assert_claims(later)
 
         self.env.run(till=30)
@@ -213,49 +212,56 @@ class PatientWorkflowTests(unittest.TestCase):
         waiting = self.patient(esi=1, at=0.5)
 
         # Occupant: triage 0-1, bed 1-5. Waiting: triage 1-2, then waits for the bed.
-        self.env.run(till=3)
-        self.assert_claims(occupant, provider=True, bed=True)
+        self.env.run(till=2.5)
+        self.assert_claims(occupant, staff="exam", bed=True)
         self.assertIn(waiting, self.beds.requesters())
         self.env.run(till=5.1)
-        self.assert_claims(waiting, provider=True, bed=True)
+        self.assert_claims(waiting, staff="exam", bed=True)
 
         self.env.run(till=15)
         self.assertEqual(self.metrics.wait_times[1], [4.5])
         self.assert_departed(occupant, waiting)
 
-    def test_nurse_serves_disposition_before_earlier_triage_request(self):
+    def test_busy_later_stage_pools_do_not_hold_up_earlier_stages(self):
         self.beds.set_capacity(2)
-        finishing = self.patient(esi=5)
-        # Finishing patient: triage 0-1, exam 1-3, diagnosis 3-4, then needs a nurse at 4.
-        self.block(self.nurses, 2.5, at=3.5)  # nurse busy 3.5-6
-        arriving = self.patient(esi=1, at=3.6)  # requests triage at 3.6, before the disposition request
+        self.block(self.staff["diagnosis"], 20)
+        self.block(self.staff["disposition"], 20)
+        first = self.patient()
+        second = self.patient(at=4)
 
-        self.env.run(till=5)
-        self.assertIn(arriving, self.nurses.requesters())
-        self.assertIn(finishing, self.nurses.requesters())
-        self.env.run(till=6.1)
-        self.assert_claims(finishing, nurse=True, bed=True)
-        self.assertIn(arriving, self.nurses.requesters())
+        # Triage 0-1 and exam 1-3 run on their own pools; diagnosis is busy until 20.
+        self.env.run(till=2)
+        self.assert_claims(first, staff="exam", bed=True)
+        self.env.run(till=4.5)
+        self.assertIn(first, self.staff["diagnosis"].requesters())
+        self.assert_claims(first, bed=True)
+        self.assert_claims(second, staff="triage")
+        self.env.run(till=6)
+        self.assert_claims(second, staff="exam", bed=True)
 
-        self.env.run(till=30)
-        self.assert_departed(finishing, arriving)
+        self.env.run(till=20.5)
+        self.assert_claims(first, staff="diagnosis", bed=True)
+        self.env.run(till=40)
+        self.assert_departed(first, second)
 
-    def test_provider_serves_diagnosis_before_earlier_exam_request(self):
+    def test_stage_pool_serves_higher_acuity_first(self):
         self.beds.set_capacity(2)
-        diagnosing = self.patient(esi=5)
-        # Exam request at 2 by a sicker patient, while the first is still in their exam until 3.
-        examining = self.patient(esi=1, at=0.5)
-        self.block(self.providers, 7, at=2.9)  # takes the provider at 3, until 10
+        self.block(self.staff["exam"], 10)
+        earlier = self.patient(esi=5)
+        later = self.patient(esi=1, at=0.5)
 
-        self.env.run(till=5)
-        self.assertIn(examining, self.providers.requesters())
-        self.assertIn(diagnosing, self.providers.requesters())
+        # Both are triaged and in a bed by 2, then wait for the busy exam pool.
+        self.env.run(till=3)
+        self.assertIn(earlier, self.staff["exam"].requesters())
+        self.assertIn(later, self.staff["exam"].requesters())
         self.env.run(till=10.1)
-        self.assert_claims(diagnosing, provider=True, bed=True)
-        self.assertIn(examining, self.providers.requesters())
+        self.assert_claims(later, staff="exam", bed=True)
+        self.assertIn(earlier, self.staff["exam"].requesters())
 
         self.env.run(till=30)
-        self.assert_departed(diagnosing, examining)
+        self.assertEqual(self.metrics.wait_times[1], [9.5])
+        self.assertEqual(self.metrics.wait_times[5], [12.0])
+        self.assert_departed(earlier, later)
 
     def test_acuity_is_sampled_at_creation_from_data(self):
         data = ([2], [1.0], {}, {2: [999.0]}, {2: [9999.0]})
