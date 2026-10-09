@@ -43,8 +43,13 @@ class PatientWorkflowTests(unittest.TestCase):
 
         # By default every optional step is skipped; tests opt in with route().
         self.test_types = {
-            "lab": {"capacity": 1, "mean_time": LAB_TIME, "probability": dict.fromkeys(range(1, 6), 0)},
-            "imaging": {"capacity": 1, "mean_time": IMAGING_TIME, "probability": dict.fromkeys(range(1, 6), 0)},
+            name: {
+                "capacity": 1,
+                "mean_time": mean_time,
+                "probability": dict.fromkeys(range(1, 6), 0),
+                "follow_up_probability": dict.fromkeys(range(1, 6), 0),
+            }
+            for name, mean_time in (("lab", LAB_TIME), ("imaging", IMAGING_TIME))
         }
         self.patch(patch.multiple(
             cfg,
@@ -52,6 +57,8 @@ class PatientWorkflowTests(unittest.TestCase):
             TEST_TYPES=self.test_types,
             TREATMENT_PROBABILITY=dict.fromkeys(range(1, 6), 0),
             ADMIT_PROBABILITY=dict.fromkeys(range(1, 6), 0),
+            DIAGNOSIS_FAILURE_PROBABILITY=dict.fromkeys(range(1, 6), 0),
+            MAX_DIAGNOSIS_ATTEMPTS=2,
             **MEANS,
         ))
         self.patch(patch("simulation.patient.random.expovariate", side_effect=lambda rate: 1 / rate))
@@ -66,11 +73,18 @@ class PatientWorkflowTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def route(self, tests=(), treatment=False, admit=False):
+    def route(self, tests=(), treatment=False, admit=False, follow_ups=(), diagnosis_fails=False):
         for test_type in tests:
             self.test_types[test_type]["probability"] = dict.fromkeys(range(1, 6), 1)
+        for test_type in follow_ups:
+            self.test_types[test_type]["follow_up_probability"] = dict.fromkeys(range(1, 6), 1)
         cfg.TREATMENT_PROBABILITY = dict.fromkeys(range(1, 6), 1 if treatment else 0)
         cfg.ADMIT_PROBABILITY = dict.fromkeys(range(1, 6), 1 if admit else 0)
+        self.set_diagnosis_failure(diagnosis_fails)
+
+    def set_diagnosis_failure(self, fails):
+        # Read at each diagnosis, so tests can change it mid-run to fail only some attempts.
+        cfg.DIAGNOSIS_FAILURE_PROBABILITY = dict.fromkeys(range(1, 6), 1 if fails else 0)
 
     def patient(self, esi=3, **kwargs):
         return Patient(
@@ -150,7 +164,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.env.run(till=32.1)
         self.assertEqual(self.metrics.lengths_of_visit[3], [32.0])
         self.assertEqual(self.metrics.stage_waits["test results"][3], [8.0])
-        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1})
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "forced": 0})
         self.assert_departed(patient)
 
     def test_minimal_path_skips_optional_steps(self):
@@ -169,7 +183,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertEqual(self.metrics.lengths_of_visit[4], [5.0])
         self.assertNotIn("test results", self.metrics.stage_waits)
         self.assertNotIn("treatment", self.metrics.stage_waits)
-        self.assertEqual(self.metrics.dispositions[4], {"discharged": 1, "admitted": 0})
+        self.assertEqual(self.metrics.dispositions[4], {"discharged": 1, "admitted": 0, "forced": 0})
         self.assert_departed(patient)
 
     def test_later_higher_acuity_bed_request_wins(self):
@@ -262,6 +276,71 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertEqual(self.metrics.wait_times[1], [9.5])
         self.assertEqual(self.metrics.wait_times[5], [12.0])
         self.assert_departed(earlier, later)
+
+    def test_failed_diagnosis_orders_follow_up_tests_then_rediagnoses(self):
+        self.route(follow_ups=("imaging",), diagnosis_fails=True)
+        patient = self.patient()
+
+        # No initial tests: triage 0-1, exam 1-3, diagnosis 3-4 fails.
+        # Follow-up imaging 4-12 (bed held), second diagnosis 12-13 succeeds, discharge 13-14.
+        self.env.run(till=5)
+        self.set_diagnosis_failure(False)
+        self.assertEqual(patient.diagnosis_attempts, 1)
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("imaging", True)])
+        self.assertIn(patient.tests[0], self.testing["imaging"].claimers())
+        self.assert_claims(patient, bed=True)
+        self.assertNotIn(patient, self.staff["diagnosis"].requesters())
+        self.assertIn(patient, self.env.q_testing)
+
+        self.env.run(till=12.5)
+        self.assert_claims(patient, staff="diagnosis", bed=True)
+        self.env.run(till=13.5)
+        self.assert_claims(patient, staff="disposition", bed=True)
+
+        self.env.run(till=15)
+        self.assertEqual(patient.diagnosis_attempts, 2)
+        self.assertFalse(patient.forced_admission)
+        self.assertEqual(self.metrics.failed_diagnoses[3], 1)
+        self.assertEqual(self.metrics.stage_waits["follow-up results"][3], [8.0])
+        self.assertIn("follow-up imaging queue", self.metrics.stage_waits)
+        self.assertNotIn("test results", self.metrics.stage_waits)
+        self.assertEqual(self.metrics.lengths_of_visit[3], [14.0])
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 1, "admitted": 0, "forced": 0})
+        self.assert_departed(patient)
+
+    def test_failing_last_diagnosis_attempt_forces_admission(self):
+        self.route(tests=("lab",), follow_ups=("imaging",), treatment=True, diagnosis_fails=True)
+        patient = self.patient()
+
+        # Initial lab 3-7, diagnosis 7-8 fails; follow-up imaging 8-16, diagnosis 16-17 fails.
+        # Admitted despite ADMIT_PROBABILITY 0: treatment 17-19, boarding 19-35, transfer 35-37.
+        self.env.run(till=18)
+        self.assertEqual(patient.diagnosis_attempts, 2)
+        self.assertTrue(patient.forced_admission)
+        self.assert_claims(patient, staff="treatment", bed=True)
+        self.env.run(till=20)
+        self.assertIn(patient, self.env.q_boarding)
+
+        self.env.run(till=38)
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("lab", False), ("imaging", True)])
+        self.assertEqual(self.metrics.failed_diagnoses[3], 2)
+        self.assertEqual(self.metrics.lengths_of_visit[3], [37.0])
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "forced": 1})
+        self.assert_departed(patient)
+
+    def test_failed_diagnosis_always_orders_a_follow_up(self):
+        self.route(diagnosis_fails=True)
+        # Imaging is almost never drawn on its own and lab never is, so the guaranteed pick is imaging.
+        self.test_types["imaging"]["follow_up_probability"] = dict.fromkeys(range(1, 6), 1e-12)
+        patient = self.patient()
+
+        self.env.run(till=5)
+        self.set_diagnosis_failure(False)
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("imaging", True)])
+
+        self.env.run(till=20)
+        self.assertEqual(self.metrics.failed_diagnoses[3], 1)
+        self.assert_departed(patient)
 
     def test_acuity_is_sampled_at_creation_from_data(self):
         data = ([2], [1.0], {}, {2: [999.0]}, {2: [9999.0]})

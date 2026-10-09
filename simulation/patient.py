@@ -16,6 +16,8 @@ class Patient(sim.Component):
         self.esi = esi
         self.data = data
         self.tests = []
+        self.diagnosis_attempts = 0
+        self.forced_admission = False
         self.admitted = None
         self._assign_esi()
 
@@ -111,18 +113,28 @@ class Patient(sim.Component):
         yield self.request(resource, request_priority=priority)
         self.metrics.record_stage_wait(stage, self.esi, self.env.now() - requested_at)
 
-    def _order_tests(self):
-        # Each ordered test is its own component, linked to this patient, that starts immediately.
-        for test_type, spec in cfg.TEST_TYPES.items():
-            if random.random() < spec["probability"][self.esi]:
-                self.tests.append(
-                    DiagnosticTest(
-                        patient=self,
-                        test_type=test_type,
-                        resource=self.testing[test_type],
-                        env=self.env,
-                    )
-                )
+    def _order_tests(self, follow_up=False):
+        """Order tests and return them. Each is its own component, linked to this patient, that starts immediately."""
+        key = "follow_up_probability" if follow_up else "probability"
+        chances = {test_type: spec[key][self.esi] for test_type, spec in cfg.TEST_TYPES.items()}
+        ordered = [test_type for test_type, chance in chances.items() if random.random() < chance]
+        if follow_up and not ordered:
+            # A failed diagnosis always gets at least one follow-up test, picked by the follow-up chances.
+            weights = list(chances.values()) if sum(chances.values()) > 0 else None
+            ordered = random.choices(list(chances), weights=weights, k=1)
+
+        new_tests = [
+            DiagnosticTest(
+                patient=self,
+                test_type=test_type,
+                resource=self.testing[test_type],
+                follow_up=follow_up,
+                env=self.env,
+            )
+            for test_type in ordered
+        ]
+        self.tests.extend(new_tests)
+        return new_tests
 
     def process(self):
         # Measure wait from the moment the patient enters the ER.
@@ -146,19 +158,34 @@ class Patient(sim.Component):
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXAM_TIME))
         self.release(self.staff["exam"])
 
-        # TESTING. Tests are ordered as the exam finishes; the patient waits in bed for all results.
-        self._order_tests()
-        if self.tests:
-            yield from self._enter_stage(self.env.q_testing)
-            ordered_at = self.env.now()
-            yield self.wait(*[test.done for test in self.tests], all=True)
-            self.metrics.record_stage_wait("test results", self.esi, self.env.now() - ordered_at)
+        # TESTING AND DIAGNOSIS. Initial tests are ordered as the exam finishes. A failed diagnosis
+        # orders follow-up tests and diagnoses again, up to MAX_DIAGNOSIS_ATTEMPTS; if the last
+        # attempt also fails, the patient will be admitted.
+        follow_up = False
+        while True:
+            # TESTING. The patient waits in bed for all results of this round.
+            tests = self._order_tests(follow_up)
+            if tests:
+                yield from self._enter_stage(self.env.q_testing)
+                ordered_at = self.env.now()
+                yield self.wait(*[test.done for test in tests], all=True)
+                stage = "follow-up results" if follow_up else "test results"
+                self.metrics.record_stage_wait(stage, self.esi, self.env.now() - ordered_at)
 
-        # DIAGNOSIS (diagnosing provider). Requires the bed and all test results.
-        yield from self._acquire("diagnosis", self.env.q_wait_diagnosis, self.staff["diagnosis"], self.esi)
-        yield from self._enter_stage(self.env.q_in_diagnosis)
-        yield self.hold(random.expovariate(1.0 / cfg.MEAN_DIAGNOSIS_TIME))
-        self.release(self.staff["diagnosis"])
+            # DIAGNOSIS (diagnosing provider). Requires the bed and all test results.
+            yield from self._acquire("diagnosis", self.env.q_wait_diagnosis, self.staff["diagnosis"], self.esi)
+            yield from self._enter_stage(self.env.q_in_diagnosis)
+            yield self.hold(random.expovariate(1.0 / cfg.MEAN_DIAGNOSIS_TIME))
+            self.release(self.staff["diagnosis"])
+            self.diagnosis_attempts += 1
+
+            if random.random() >= cfg.DIAGNOSIS_FAILURE_PROBABILITY[self.esi]:
+                break
+            self.metrics.record_failed_diagnosis(self.esi)
+            if self.diagnosis_attempts >= cfg.MAX_DIAGNOSIS_ATTEMPTS:
+                self.forced_admission = True
+                break
+            follow_up = True
 
         # TREATMENT (treatment nurse), if needed.
         if random.random() < cfg.TREATMENT_PROBABILITY[self.esi]:
@@ -168,7 +195,7 @@ class Patient(sim.Component):
             self.release(self.staff["treatment"])
 
         # DISPOSITION. Admitted/transferred patients board in their ED bed first.
-        self.admitted = random.random() < cfg.ADMIT_PROBABILITY[self.esi]
+        self.admitted = self.forced_admission or random.random() < cfg.ADMIT_PROBABILITY[self.esi]
         if self.admitted:
             yield from self._enter_stage(self.env.q_boarding)
             yield self.hold(random.expovariate(1.0 / cfg.MEAN_BOARDING_TIME))
@@ -184,4 +211,4 @@ class Patient(sim.Component):
         self._safe_move(None)
         length_of_visit = self.env.now() - arrival_time
         self.metrics.record_length_of_visit(self.esi, length_of_visit)
-        self.metrics.record_disposition(self.esi, self.admitted)
+        self.metrics.record_disposition(self.esi, self.admitted, self.forced_admission)

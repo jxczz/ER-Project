@@ -21,13 +21,20 @@ TEST_TYPES = {
         "capacity": 3,
         "mean_time": 45,
         "probability": {1: 0.95, 2: 0.9, 3: 0.75, 4: 0.3, 5: 0.1},
+        "follow_up_probability": {1: 0.5, 2: 0.5, 3: 0.4, 4: 0.3, 5: 0.3},
     },
     "imaging": {
         "capacity": 2,
         "mean_time": 40,
         "probability": {1: 0.9, 2: 0.75, 3: 0.5, 4: 0.25, 5: 0.05},
+        "follow_up_probability": {1: 0.7, 2: 0.7, 3: 0.6, 4: 0.5, 5: 0.5},
     },
 }
+
+# A diagnosis can fail, which orders follow-up tests (from "follow_up_probability" above, at least
+# one) and another diagnosis. If the last allowed attempt also fails, the patient is admitted.
+DIAGNOSIS_FAILURE_PROBABILITY = {1: 0.1, 2: 0.08, 3: 0.06, 4: 0.04, 5: 0.02}
+MAX_DIAGNOSIS_ATTEMPTS = 2
 
 # Treatment after diagnosis (treatment nurse + bed). Keyed by ESI 1..5.
 TREATMENT_PROBABILITY = {1: 1.0, 2: 0.9, 3: 0.7, 4: 0.4, 5: 0.2}
