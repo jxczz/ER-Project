@@ -66,7 +66,7 @@ def _try_set_animation_parameters(env):
         except TypeError:
             continue
 
-def setup_animation(env):
+def setup_animation(env, hospital_beds=None):
     """
     Configure Salabim's built-in animation window for this simulation.
 
@@ -85,10 +85,20 @@ def setup_animation(env):
         textcolor=white,
     )
 
+    if hospital_beds is not None:
+        _animate_text(
+            lambda: f"Hospital beds: {hospital_beds.claimed_quantity()}/{hospital_beds.capacity()}",
+            x=350,
+            y=28,
+            fontsize=12,
+            xy_anchor="ne",
+            textcolor=white,
+        )
+
     # Layout: keep all stages visible.
     x0 = 12
     title_gap = 14
-    step = 38
+    step = 33
     y0 = 28
 
     sections = [(label, getattr(env, name)) for name, label in STAGE_QUEUES]

@@ -2,14 +2,16 @@ import random
 import salabim as sim
 import config as cfg
 from simulation.diagnostic_test import DiagnosticTest
+from simulation.hospital import InpatientStay
 
 
 class Patient(sim.Component):
-    def setup(self, staff, beds, testing, metrics, esi=None, data=None):
+    def setup(self, staff, beds, testing, hospital_beds, metrics, esi=None, data=None):
         # One staff pool per stage, keyed by stage name.
         self.staff = staff
         self.beds = beds
         self.testing = testing
+        self.hospital_beds = hospital_beds
         self.metrics = metrics
 
         # If esi is provided explicitly, use it. Otherwise, assign ESI now.
@@ -19,6 +21,9 @@ class Patient(sim.Component):
         self.diagnosis_attempts = 0
         self.forced_admission = False
         self.admitted = None
+        # "discharged", "admitted" (got a hospital bed) or "blocked" (no bed in time; discharged).
+        self.outcome = None
+        self.inpatient_stay = None
         self._assign_esi()
 
     def _safe_move(self, new_queue):
@@ -194,15 +199,37 @@ class Patient(sim.Component):
             yield self.hold(random.expovariate(1.0 / cfg.MEAN_TREATMENT_TIME[self.esi]))
             self.release(self.staff["treatment"])
 
-        # DISPOSITION. Admitted/transferred patients board in their ED bed first.
+        # DISPOSITION. Admitted patients board in their ED bed, waiting up to MAX_BOARDING_WAIT for a
+        # main-hospital bed (sicker patients first). The InpatientStay holds that bed from the moment
+        # it is found, so it stays reserved through the handoff and for the hospital stay.
         self.admitted = self.forced_admission or random.random() < cfg.ADMIT_PROBABILITY[self.esi]
+        self.outcome = "discharged"
         if self.admitted:
             yield from self._enter_stage(self.env.q_boarding)
-            yield self.hold(random.expovariate(1.0 / cfg.MEAN_BOARDING_TIME))
-        # Discharge/transfer staff.
+            boarding_start = self.env.now()
+            self.inpatient_stay = InpatientStay(
+                hospital_beds=self.hospital_beds,
+                metrics=self.metrics,
+                max_wait=cfg.MAX_BOARDING_WAIT,
+                request_priority=self.esi,
+                from_ed=True,
+                env=self.env,
+            )
+            yield self.wait(self.inpatient_stay.decided)
+            self.metrics.record_stage_wait("boarding", self.esi, self.env.now() - boarding_start)
+            self.outcome = "admitted" if self.inpatient_stay.got_bed else "blocked"
+
+        if self.outcome == "blocked":
+            # EXTRA TREATMENT (treatment nurse): no hospital bed came free, so treat further and discharge.
+            yield from self._acquire("extra treatment", self.env.q_wait_extended, self.staff["treatment"], self.esi)
+            yield from self._enter_stage(self.env.q_in_extended)
+            yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXTENDED_TREATMENT_TIME[self.esi]))
+            self.release(self.staff["treatment"])
+
+        # Discharge/transfer staff: a transfer handoff if admitted, otherwise a discharge.
         yield from self._acquire("disposition", self.env.q_wait_disposition, self.staff["disposition"], self.esi)
         yield from self._enter_stage(self.env.q_in_disposition)
-        mean_time = cfg.MEAN_TRANSFER_TIME if self.admitted else cfg.MEAN_DISCHARGE_TIME
+        mean_time = cfg.MEAN_TRANSFER_TIME if self.outcome == "admitted" else cfg.MEAN_DISCHARGE_TIME
         yield self.hold(random.expovariate(1.0 / mean_time))
         self.release(self.staff["disposition"])
         self.release(self.beds)
@@ -211,4 +238,4 @@ class Patient(sim.Component):
         self._safe_move(None)
         length_of_visit = self.env.now() - arrival_time
         self.metrics.record_length_of_visit(self.esi, length_of_visit)
-        self.metrics.record_disposition(self.esi, self.admitted, self.forced_admission)
+        self.metrics.record_disposition(self.esi, self.outcome, self.forced_admission)

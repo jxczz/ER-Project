@@ -1,5 +1,5 @@
 import salabim as sim
-from config import STAFF, NUM_BEDS, TEST_TYPES
+from config import STAFF, NUM_BEDS, TEST_TYPES, NUM_HOSPITAL_BEDS
 
 # Animation queues in patient-flow order: (attribute name, label).
 STAGE_QUEUES = [
@@ -13,7 +13,9 @@ STAGE_QUEUES = [
     ("q_in_diagnosis", "Diagnosis (bed held)"),
     ("q_wait_treatment", "Waiting for treatment (bed held)"),
     ("q_in_treatment", "Treatment (bed held)"),
-    ("q_boarding", "Boarding for admission/transfer (bed held)"),
+    ("q_boarding", "Boarding: waiting for hospital bed (bed held)"),
+    ("q_wait_extended", "Waiting for extra treatment (bed held)"),
+    ("q_in_extended", "Extra treatment, no hospital bed (bed held)"),
     ("q_wait_disposition", "Waiting for discharge/transfer (bed held)"),
     ("q_in_disposition", "Discharge/transfer (bed held)"),
 ]
@@ -38,4 +40,7 @@ def create_environment():
         for name, spec in TEST_TYPES.items()
     }
 
-    return env, staff, beds, testing # returning the environment and resources to be used in the simulation
+    # Main-hospital beds, shared with the hospital's own (non-ED) patients.
+    hospital_beds = sim.Resource("hospital_beds", capacity = NUM_HOSPITAL_BEDS)
+
+    return env, staff, beds, testing, hospital_beds # returning the environment and resources to be used in the simulation

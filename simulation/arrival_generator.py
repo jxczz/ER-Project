@@ -5,11 +5,12 @@ from simulation.patient import Patient
 
 
 class ArrivalGenerator(sim.Component):
-    def setup(self, staff, beds, testing, metrics, data=None):
+    def setup(self, staff, beds, testing, hospital_beds, metrics, data=None):
         # Shared resources and metrics sink that each Patient will use.
         self.staff = staff
         self.beds = beds
         self.testing = testing
+        self.hospital_beds = hospital_beds
         self.metrics = metrics
         self.data = data
 
@@ -43,6 +44,7 @@ class ArrivalGenerator(sim.Component):
                 staff=self.staff,
                 beds=self.beds,
                 testing=self.testing,
+                hospital_beds=self.hospital_beds,
                 metrics=self.metrics,
                 data=self.data
             )

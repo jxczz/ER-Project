@@ -6,6 +6,7 @@ import salabim as sim
 import config as cfg
 import simulation.environment as environment
 from simulation.esi import ESI
+from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
 from simulation.patient import Patient
 
 # Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly.
@@ -15,7 +16,8 @@ MEANS = dict(
     MEAN_EXAM_TIME=2,
     MEAN_DIAGNOSIS_TIME=1,
     MEAN_TREATMENT_TIME={level: 2 for level in range(1, 6)},
-    MEAN_BOARDING_TIME=16,
+    MEAN_EXTENDED_TREATMENT_TIME={level: 4 for level in range(1, 6)},
+    MEAN_HOSPITAL_STAY=64,
     MEAN_DISCHARGE_TIME=1,
     MEAN_TRANSFER_TIME=2,
 )
@@ -59,13 +61,17 @@ class PatientWorkflowTests(unittest.TestCase):
             ADMIT_PROBABILITY=dict.fromkeys(range(1, 6), 0),
             DIAGNOSIS_FAILURE_PROBABILITY=dict.fromkeys(range(1, 6), 0),
             MAX_DIAGNOSIS_ATTEMPTS=2,
+            MAX_BOARDING_WAIT=8,
+            HOSPITAL_DISCHARGE_HOURS=(0, 24),  # hospital patients can leave at any time of day
             **MEANS,
         ))
         self.patch(patch("simulation.patient.random.expovariate", side_effect=lambda rate: 1 / rate))
 
         staff = dict.fromkeys(("triage", "exam", "diagnosis", "treatment", "disposition"), 1)
-        with patch.multiple(environment, STAFF=staff, NUM_BEDS=1, TEST_TYPES=self.test_types):
-            self.env, self.staff, self.beds, self.testing = environment.create_environment()
+        with patch.multiple(
+            environment, STAFF=staff, NUM_BEDS=1, TEST_TYPES=self.test_types, NUM_HOSPITAL_BEDS=1
+        ):
+            self.env, self.staff, self.beds, self.testing, self.hospital_beds = environment.create_environment()
         self.metrics = ESI()
         self.animation_queues = [getattr(self.env, name) for name, _label in environment.STAGE_QUEUES]
 
@@ -91,6 +97,7 @@ class PatientWorkflowTests(unittest.TestCase):
             staff=self.staff,
             beds=self.beds,
             testing=self.testing,
+            hospital_beds=self.hospital_beds,
             metrics=self.metrics,
             esi=esi,
             env=self.env,
@@ -122,6 +129,7 @@ class PatientWorkflowTests(unittest.TestCase):
 
     def test_full_path_with_parallel_tests_treatment_and_admission(self):
         self.route(tests=("lab", "imaging"), treatment=True, admit=True)
+        self.block(self.hospital_beds, 20)  # the only hospital bed frees up at 20
         patient = self.patient()
 
         # Triage 0-1 (nurse), bed at 1, exam 1-3 (provider).
@@ -153,19 +161,29 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_claims(patient, staff="treatment", bed=True)
         self.assertIn(patient, self.env.q_in_treatment)
 
-        # Boarding 14-30 holds only the bed; transfer 30-32 (nurse).
-        self.env.run(till=20)
+        # Boarding 14-20 holds only the ED bed until the hospital bed frees; transfer 20-22.
+        self.env.run(till=17)
         self.assert_claims(patient, bed=True)
         self.assertIn(patient, self.env.q_boarding)
-        self.env.run(till=31)
+        self.assertIn(patient.inpatient_stay, self.hospital_beds.requesters())
+        self.env.run(till=21)
         self.assert_claims(patient, staff="disposition", bed=True)
+        self.assertIn(patient.inpatient_stay, self.hospital_beds.claimers())
         self.assertEqual(self.metrics.lengths_of_visit[3], [])
 
-        self.env.run(till=32.1)
-        self.assertEqual(self.metrics.lengths_of_visit[3], [32.0])
+        self.env.run(till=22.1)
+        self.assertEqual(self.metrics.lengths_of_visit[3], [22.0])
         self.assertEqual(self.metrics.stage_waits["test results"][3], [8.0])
-        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "forced": 0})
+        self.assertEqual(self.metrics.stage_waits["boarding"][3], [6.0])
+        self.assertEqual(patient.outcome, "admitted")
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "blocked": 0, "forced": 0})
         self.assert_departed(patient)
+
+        # The hospital stay keeps the bed after the patient leaves the ED, until 20 + 64.
+        self.env.run(till=83.9)
+        self.assertIn(patient.inpatient_stay, self.hospital_beds.claimers())
+        self.env.run(till=84.1)
+        self.assertEqual(self.hospital_beds.claimed_quantity(), 0)
 
     def test_minimal_path_skips_optional_steps(self):
         patient = self.patient(esi=4)
@@ -183,7 +201,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertEqual(self.metrics.lengths_of_visit[4], [5.0])
         self.assertNotIn("test results", self.metrics.stage_waits)
         self.assertNotIn("treatment", self.metrics.stage_waits)
-        self.assertEqual(self.metrics.dispositions[4], {"discharged": 1, "admitted": 0, "forced": 0})
+        self.assertEqual(self.metrics.dispositions[4], {"discharged": 1, "admitted": 0, "blocked": 0, "forced": 0})
         self.assert_departed(patient)
 
     def test_later_higher_acuity_bed_request_wins(self):
@@ -305,7 +323,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertIn("follow-up imaging queue", self.metrics.stage_waits)
         self.assertNotIn("test results", self.metrics.stage_waits)
         self.assertEqual(self.metrics.lengths_of_visit[3], [14.0])
-        self.assertEqual(self.metrics.dispositions[3], {"discharged": 1, "admitted": 0, "forced": 0})
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 1, "admitted": 0, "blocked": 0, "forced": 0})
         self.assert_departed(patient)
 
     def test_failing_last_diagnosis_attempt_forces_admission(self):
@@ -313,19 +331,19 @@ class PatientWorkflowTests(unittest.TestCase):
         patient = self.patient()
 
         # Initial lab 3-7, diagnosis 7-8 fails; follow-up imaging 8-16, diagnosis 16-17 fails.
-        # Admitted despite ADMIT_PROBABILITY 0: treatment 17-19, boarding 19-35, transfer 35-37.
+        # Admitted despite ADMIT_PROBABILITY 0: treatment 17-19, hospital bed free at 19, transfer 19-21.
         self.env.run(till=18)
         self.assertEqual(patient.diagnosis_attempts, 2)
         self.assertTrue(patient.forced_admission)
         self.assert_claims(patient, staff="treatment", bed=True)
         self.env.run(till=20)
-        self.assertIn(patient, self.env.q_boarding)
+        self.assert_claims(patient, staff="disposition", bed=True)
 
-        self.env.run(till=38)
+        self.env.run(till=22)
         self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("lab", False), ("imaging", True)])
         self.assertEqual(self.metrics.failed_diagnoses[3], 2)
-        self.assertEqual(self.metrics.lengths_of_visit[3], [37.0])
-        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "forced": 1})
+        self.assertEqual(self.metrics.lengths_of_visit[3], [21.0])
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "blocked": 0, "forced": 1})
         self.assert_departed(patient)
 
     def test_failed_diagnosis_always_orders_a_follow_up(self):
@@ -341,6 +359,77 @@ class PatientWorkflowTests(unittest.TestCase):
         self.env.run(till=20)
         self.assertEqual(self.metrics.failed_diagnoses[3], 1)
         self.assert_departed(patient)
+
+    def test_boarding_times_out_then_extra_treatment_and_discharge(self):
+        self.route(admit=True)
+        self.block(self.hospital_beds, 100)
+        patient = self.patient()
+
+        # Diagnosis ends at 4; boarding 4-12 gives up after MAX_BOARDING_WAIT (8).
+        # Extra treatment 12-16 (treatment nurse), discharge 16-17.
+        self.env.run(till=10)
+        self.assertIn(patient, self.env.q_boarding)
+        self.assertIn(patient.inpatient_stay, self.hospital_beds.requesters())
+        self.env.run(till=13)
+        self.assert_claims(patient, staff="treatment", bed=True)
+        self.assertIn(patient, self.env.q_in_extended)
+        self.assertEqual(len(self.hospital_beds.requesters()), 0)
+        self.assertFalse(patient.inpatient_stay.got_bed)
+
+        self.env.run(till=18)
+        self.assertEqual(patient.outcome, "blocked")
+        self.assertEqual(self.metrics.stage_waits["boarding"][3], [8.0])
+        self.assertEqual(self.metrics.lengths_of_visit[3], [17.0])
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 0, "blocked": 1, "forced": 0})
+        self.assert_departed(patient)
+
+    def test_forced_admission_without_hospital_bed_follows_same_rule(self):
+        self.route(follow_ups=("imaging",), diagnosis_fails=True)
+        self.block(self.hospital_beds, 100)
+        patient = self.patient()
+
+        # Diagnosis 3-4 fails, follow-up imaging 4-12, diagnosis 12-13 fails (forced).
+        # Boarding 13-21 times out, extra treatment 21-25, discharge 25-26.
+        self.env.run(till=27)
+        self.assertTrue(patient.forced_admission)
+        self.assertEqual(patient.outcome, "blocked")
+        self.assertEqual(self.metrics.lengths_of_visit[3], [26.0])
+        self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 0, "blocked": 1, "forced": 1})
+        self.assert_departed(patient)
+
+    def test_hospital_stays_end_in_discharge_window(self):
+        cfg.HOSPITAL_DISCHARGE_HOURS = (11, 17)
+        day = 24 * 60
+        self.assertEqual(next_discharge_time(12 * 60), 12 * 60)
+        self.assertTrue(11 * 60 <= next_discharge_time(3 * 60) < 17 * 60)
+        self.assertTrue(day + 11 * 60 <= next_discharge_time(18 * 60) < day + 17 * 60)
+
+        # A stay starting at 0 ends at 64 (01:04), so the bed is released at 11:00-17:00 that day.
+        stay = InpatientStay(hospital_beds=self.hospital_beds, metrics=None, env=self.env)
+        self.env.run(till=11 * 60 - 1)
+        self.assertIn(stay, self.hospital_beds.claimers())
+        self.env.run(till=17 * 60)
+        self.assertEqual(self.hospital_beds.claimed_quantity(), 0)
+
+    def test_non_ed_patients_are_turned_away_when_hospital_full(self):
+        first = InpatientStay(hospital_beds=self.hospital_beds, metrics=self.metrics, env=self.env)
+        second = InpatientStay(hospital_beds=self.hospital_beds, metrics=self.metrics, env=self.env)
+
+        self.env.run(till=1)
+        self.assertTrue(first.got_bed)
+        self.assertFalse(second.got_bed)
+        self.assertEqual(len(self.hospital_beds.requesters()), 0)
+        self.assertEqual(self.metrics.non_ed_admissions, {"admitted": 1, "turned_away": 1})
+
+    def test_census_fills_initial_occupancy(self):
+        self.hospital_beds.set_capacity(10)
+        self.patch(patch.multiple(cfg, HOSPITAL_INITIAL_OCCUPANCY=0.5, NON_ED_ADMISSIONS_PER_DAY=0))
+        HospitalCensus(hospital_beds=self.hospital_beds, metrics=self.metrics, env=self.env)
+
+        self.env.run(till=1)
+        self.assertEqual(self.hospital_beds.claimed_quantity(), 5)
+        # Patients already in the hospital at the start are not counted as new admissions.
+        self.assertEqual(self.metrics.non_ed_admissions, {"admitted": 0, "turned_away": 0})
 
     def test_acuity_is_sampled_at_creation_from_data(self):
         data = ([2], [1.0], {}, {2: [999.0]}, {2: [9999.0]})
