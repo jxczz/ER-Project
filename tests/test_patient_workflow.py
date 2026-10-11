@@ -1,3 +1,4 @@
+import random
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,8 @@ import salabim as sim
 
 import config as cfg
 import simulation.environment as environment
+from simulation.arrival_generator import ArrivalGenerator
+from simulation.data_reader import ERDataReader
 from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
 from simulation.patient import Patient
@@ -442,6 +445,53 @@ class PatientWorkflowTests(unittest.TestCase):
         self.env.run(till=6)
         self.assertEqual(self.metrics.lengths_of_visit[2], [5.0])
         self.assert_departed(patient)
+
+
+
+class PatientAccountingTests(unittest.TestCase):
+    """Full multi-day runs with real config and randomness, checking that no patient is lost."""
+
+    def setUp(self):
+        previous_yieldless = sim.yieldless()
+        sim.yieldless(False)
+        self.addCleanup(sim.yieldless, previous_yieldless)
+        animate = patch.object(cfg, "ANIMATE", False)
+        animate.start()
+        self.addCleanup(animate.stop)
+        random.seed(12345)
+        sim.random_seed(12345)
+
+    def run_ed(self, data=None, days=3):
+        env, staff, beds, testing, hospital_beds = environment.create_environment()
+        metrics = ESI()
+        HospitalCensus(hospital_beds=hospital_beds, metrics=metrics, env=env)
+        ArrivalGenerator(
+            staff=staff, beds=beds, testing=testing, hospital_beds=hospital_beds,
+            metrics=metrics, data=data, env=env,
+        )
+        # Check at odd times through the run, not only at the end.
+        for hours in range(7, days * 24, 7):
+            env.run(till=hours * 60)
+            self.assertEqual(metrics.check_accounting(env, beds), [], f"at hour {hours}")
+        return env, beds, metrics
+
+    def test_every_patient_is_accounted_for_in_synthetic_mode(self):
+        _env, _beds, metrics = self.run_ed()
+        self.assertGreater(sum(metrics.arrivals.values()), 100)
+        self.assertGreater(sum(len(v) for v in metrics.lengths_of_visit.values()), 100)
+
+    def test_every_patient_is_accounted_for_in_dataset_mode(self):
+        data = ERDataReader(cfg.DATASET_PATH).load_and_prepare()
+        _env, _beds, metrics = self.run_ed(data=data)
+        self.assertGreater(sum(metrics.arrivals.values()), 100)
+
+    def test_check_reports_a_lost_patient(self):
+        env, beds, metrics = self.run_ed(days=1)
+        patient = next(iter(metrics.in_ed))
+        metrics.in_ed.discard(patient)  # simulate a patient disappearing from the books
+        problems = metrics.check_accounting(env, beds)
+        self.assertTrue(any("arrived but" in problem for problem in problems), problems)
+        self.assertTrue(any("not in the ED" in problem for problem in problems), problems)
 
 
 if __name__ == "__main__":

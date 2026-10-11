@@ -64,4 +64,4 @@ ArrivalGenerator(
 
 env.run(till=SIMULATION_TIME)
 print(f"Simulation Time Elapsed: {env.now():.2f} minutes")
-esi_tracker.report(hospital_beds)
+esi_tracker.report(hospital_beds, env=env, beds=beds)

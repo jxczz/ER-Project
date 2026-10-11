@@ -144,6 +144,7 @@ class Patient(sim.Component):
     def process(self):
         # Measure wait from the moment the patient enters the ER.
         arrival_time = self.env.now()
+        self.metrics.record_arrival(self)
         self._anim_queue = None
 
         # TRIAGE (triage staff). FIFO: acuity is not known until triage is done.
@@ -239,3 +240,4 @@ class Patient(sim.Component):
         length_of_visit = self.env.now() - arrival_time
         self.metrics.record_length_of_visit(self.esi, length_of_visit)
         self.metrics.record_disposition(self.esi, self.outcome, self.forced_admission)
+        self.metrics.record_departure(self)
