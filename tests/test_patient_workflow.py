@@ -67,7 +67,7 @@ class PatientWorkflowTests(unittest.TestCase):
         ))
         self.patch(patch("simulation.patient.random.expovariate", side_effect=lambda rate: 1 / rate))
 
-        staff = dict.fromkeys(("triage", "exam", "diagnosis", "treatment", "disposition"), 1)
+        staff = dict.fromkeys(("triage", "exam", "diagnosis", "treatment", "extra_treatment", "disposition"), 1)
         with patch.multiple(
             environment, STAFF=staff, NUM_BEDS=1, TEST_TYPES=self.test_types, NUM_HOSPITAL_BEDS=1
         ):
@@ -366,12 +366,12 @@ class PatientWorkflowTests(unittest.TestCase):
         patient = self.patient()
 
         # Diagnosis ends at 4; boarding 4-12 gives up after MAX_BOARDING_WAIT (8).
-        # Extra treatment 12-16 (treatment nurse), discharge 16-17.
+        # Extra treatment 12-16 (its own staff pool), discharge 16-17.
         self.env.run(till=10)
         self.assertIn(patient, self.env.q_boarding)
         self.assertIn(patient.inpatient_stay, self.hospital_beds.requesters())
         self.env.run(till=13)
-        self.assert_claims(patient, staff="treatment", bed=True)
+        self.assert_claims(patient, staff="extra_treatment", bed=True)
         self.assertIn(patient, self.env.q_in_extended)
         self.assertEqual(len(self.hospital_beds.requesters()), 0)
         self.assertFalse(patient.inpatient_stay.got_bed)

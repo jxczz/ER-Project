@@ -146,7 +146,7 @@ class Patient(sim.Component):
         arrival_time = self.env.now()
         self._anim_queue = None
 
-        # TRIAGE (triage nurse). FIFO: acuity is not known until triage is done.
+        # TRIAGE (triage staff). FIFO: acuity is not known until triage is done.
         yield from self._acquire("triage", self.env.q_wait_triage, self.staff["triage"])
         yield from self._enter_stage(self.env.q_in_triage)
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_TRIAGE_TIME))
@@ -192,7 +192,7 @@ class Patient(sim.Component):
                 break
             follow_up = True
 
-        # TREATMENT (treatment nurse), if needed.
+        # TREATMENT (treatment staff), if needed.
         if random.random() < cfg.TREATMENT_PROBABILITY[self.esi]:
             yield from self._acquire("treatment", self.env.q_wait_treatment, self.staff["treatment"], self.esi)
             yield from self._enter_stage(self.env.q_in_treatment)
@@ -220,11 +220,11 @@ class Patient(sim.Component):
             self.outcome = "admitted" if self.inpatient_stay.got_bed else "blocked"
 
         if self.outcome == "blocked":
-            # EXTRA TREATMENT (treatment nurse): no hospital bed came free, so treat further and discharge.
-            yield from self._acquire("extra treatment", self.env.q_wait_extended, self.staff["treatment"], self.esi)
+            # EXTRA TREATMENT (own staff pool): no hospital bed came free, so treat further and discharge.
+            yield from self._acquire("extra treatment", self.env.q_wait_extended, self.staff["extra_treatment"], self.esi)
             yield from self._enter_stage(self.env.q_in_extended)
             yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXTENDED_TREATMENT_TIME[self.esi]))
-            self.release(self.staff["treatment"])
+            self.release(self.staff["extra_treatment"])
 
         # Discharge/transfer staff: a transfer handoff if admitted, otherwise a discharge.
         yield from self._acquire("disposition", self.env.q_wait_disposition, self.staff["disposition"], self.esi)

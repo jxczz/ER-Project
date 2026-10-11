@@ -1,10 +1,12 @@
-# Staffing. Each stage has its own pool; staff are never shared between stages.
+# Staffing: one independent pool per stage (number of staff working that stage).
+# No stage draws on another stage's pool.
 STAFF = {
-    "triage": 2,       # triage nurses
-    "exam": 2,         # examining providers
-    "diagnosis": 2,    # diagnosing providers
-    "treatment": 4,    # treatment nurses
-    "disposition": 3,  # discharge/transfer staff
+    "triage": 2,
+    "exam": 2,
+    "diagnosis": 2,
+    "treatment": 4,
+    "extra_treatment": 2,  # patients whose admission was blocked (no hospital bed)
+    "disposition": 3,      # discharge/transfer
 }
 NUM_BEDS = 25
 
@@ -36,13 +38,13 @@ TEST_TYPES = {
 DIAGNOSIS_FAILURE_PROBABILITY = {1: 0.1, 2: 0.08, 3: 0.06, 4: 0.04, 5: 0.02}
 MAX_DIAGNOSIS_ATTEMPTS = 2
 
-# Treatment after diagnosis (treatment nurse + bed). Keyed by ESI 1..5.
+# Treatment after diagnosis (treatment staff + bed). Keyed by ESI 1..5.
 TREATMENT_PROBABILITY = {1: 1.0, 2: 0.9, 3: 0.7, 4: 0.4, 5: 0.2}
 MEAN_TREATMENT_TIME = {1: 90, 2: 60, 3: 40, 4: 20, 5: 10}
 
 # Disposition. Admitted patients board in their ED bed for up to MAX_BOARDING_WAIT minutes waiting
 # for a main-hospital bed, then are handed off (transfer). If no bed frees up in time they get extra
-# ED treatment (treatment nurse) and are discharged instead.
+# ED treatment (extra treatment staff) and are discharged instead.
 ADMIT_PROBABILITY = {1: 0.8, 2: 0.5, 3: 0.2, 4: 0.03, 5: 0.01}
 MAX_BOARDING_WAIT = 240
 MEAN_EXTENDED_TREATMENT_TIME = {1: 120, 2: 90, 3: 60, 4: 45, 5: 30}
