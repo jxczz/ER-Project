@@ -11,7 +11,7 @@ STAFF = {
 NUM_BEDS = 25
 
 # These are in minutes and can be adjusted at any time if no dataset is provided.
-MEAN_ARRIVAL_TIME = 9
+MEAN_ARRIVAL_TIME = 16  # ~90 arrivals/day, matching the NHAMCS average volume
 MEAN_TRIAGE_TIME = 5
 MEAN_EXAM_TIME = 15
 MEAN_DIAGNOSIS_TIME = 10
