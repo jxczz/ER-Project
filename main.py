@@ -17,7 +17,7 @@ from simulation.arrival_generator import ArrivalGenerator
 from simulation.hospital import HospitalCensus
 from simulation.esi import ESI
 from simulation.data_reader import ERDataReader
-from config import SIMULATION_TIME, DATASET_PATH, ANIMATE
+from config import SIMULATION_TIME, DATASET_PATH, ARRIVALS_PER_DAY, ANIMATE
 print("Seed: ", seed)
 
 # Create the environment and shared resources used by all patients.
@@ -43,7 +43,7 @@ if DATASET_PATH:
 
     if dataset_path.exists():
         # Load and preprocess the dataset into distributions used by ArrivalGenerator.
-        reader = ERDataReader(dataset_path)
+        reader = ERDataReader(dataset_path, arrivals_per_day=ARRIVALS_PER_DAY)
         data = reader.load_and_prepare()
         print(f"Dataset loaded successfully from {dataset_path}.")
     else:

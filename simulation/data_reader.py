@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -9,13 +10,21 @@ class ERDataReader:
     It standardizes the data and extracts statistical distributions for use in ER simulation models.
     """
 
-    def __init__(self, filepath):
+    def __init__(self, filepath, arrivals_per_day=None):
         raw_path = Path(filepath)
         if raw_path.is_absolute():
             self.filepath = raw_path
         else:
             project_root = Path(__file__).resolve().parent.parent
             self.filepath = project_root / raw_path
+        if arrivals_per_day is not None and not (
+            isinstance(arrivals_per_day, (int, float))
+            and math.isfinite(arrivals_per_day)
+            and arrivals_per_day > 0
+        ):
+            raise ValueError(f"arrivals_per_day must be a positive finite number or None, got {arrivals_per_day!r}")
+        # Total ED arrivals per day; None uses the NHAMCS national mean ED.
+        self.arrivals_per_day = arrivals_per_day
         self.df = None
 
     def load_data(self):
@@ -123,9 +132,11 @@ class ERDataReader:
         if ed_weights[ed_weights > 0].sum() <= 0 or hourly_weights.sum() <= 0:
             raise ValueError("NHAMCS arrival rates require positive ED and valid-time visit weights")
         daily_mean = weights.sum() / ed_weights[ed_weights > 0].sum() / 365
-        # Redistribute unknown-time visits using the known-time profile.
-        # This models a national mean ED, not a particular hospital.
-        self.hourly_arrival_rates = (daily_mean * hourly_weights / hourly_weights.sum()).tolist()
+        # Total daily volume: the NHAMCS national mean ED unless ARRIVALS_PER_DAY sets it.
+        daily_volume = daily_mean if self.arrivals_per_day is None else self.arrivals_per_day
+        # Spread the daily volume over the hours using the known-time NHAMCS profile
+        # (this also redistributes unknown-time visits).
+        self.hourly_arrival_rates = (daily_volume * hourly_weights / hourly_weights.sum()).tolist()
         # Preserve the existing valid-arrival-time subset for clinical distributions.
         self.df = self.df.loc[valid].copy()
 

@@ -66,6 +66,9 @@ ESI_WEIGHTS_SYNTHETIC = [3, 12, 40, 35, 10]  # ESI 1..5
 SIMULATION_TIME = 5000
 
 DATASET_PATH = "nhamcs/nhamcs2022.parquet"
+# The hour-of-day arrival pattern always comes from NHAMCS; this only sets total ED arrivals per day.
+# None uses the NHAMCS national mean ED (~91/day for 2022).
+ARRIVALS_PER_DAY = None
 
 # Turn this to True for animation, otherwise keep it False.
 ANIMATE = True
