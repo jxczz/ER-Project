@@ -5,3 +5,4 @@ pandas
 pyreadstat
 pyarrow
 fastparquet
+pillow

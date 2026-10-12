@@ -14,19 +14,23 @@ sim.random_seed(seed)
 # Environment/resources, arrival process, and metrics collection.
 from simulation.environment import create_environment
 from simulation.arrival_generator import ArrivalGenerator
+from simulation.hospital import HospitalCensus
 from simulation.esi import ESI
 from simulation.data_reader import ERDataReader
 from config import SIMULATION_TIME, DATASET_PATH, ANIMATE
 print("Seed: ", seed)
 
 # Create the environment and shared resources used by all patients.
-env, triage, providers, beds = create_environment()
+env, staff, beds, testing, hospital_beds = create_environment()
 
 if ANIMATE:
     from simulation.animation import setup_animation
-    setup_animation(env)
+    setup_animation(env, hospital_beds)
 
 esi_tracker = ESI()
+
+# The main hospital's own patients, so hospital occupancy fluctuates independently of the ED.
+HospitalCensus(hospital_beds=hospital_beds, metrics=esi_tracker)
 
 # Optional dataset-driven distributions.
 data = None
@@ -50,13 +54,14 @@ else:
 
 # This continuously spawns Patient components over time.
 ArrivalGenerator(
-    triage=triage,
-    providers=providers,
+    staff=staff,
     beds=beds,
+    testing=testing,
+    hospital_beds=hospital_beds,
     metrics=esi_tracker,
     data=data
 )
 
 env.run(till=SIMULATION_TIME)
 print(f"Simulation Time Elapsed: {env.now():.2f} minutes")
-esi_tracker.report()
+esi_tracker.report(hospital_beds, env=env, beds=beds)

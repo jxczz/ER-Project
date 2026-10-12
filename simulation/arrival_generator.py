@@ -5,11 +5,12 @@ from simulation.patient import Patient
 
 
 class ArrivalGenerator(sim.Component):
-    def setup(self, triage, providers, beds, metrics, data=None):
+    def setup(self, staff, beds, testing, hospital_beds, metrics, data=None):
         # Shared resources and metrics sink that each Patient will use.
-        self.triage = triage
-        self.providers = providers
+        self.staff = staff
         self.beds = beds
+        self.testing = testing
+        self.hospital_beds = hospital_beds
         self.metrics = metrics
         self.data = data
 
@@ -18,7 +19,7 @@ class ArrivalGenerator(sim.Component):
         while True:
             if self.data is not None:
                 # ArrivalGenerator only controls *when* patients arrive.
-                # ESI assignment happens during triage inside Patient.
+                # ESI assignment happens when the Patient is created.
                 _esi_levels, _esi_weights, hourly_arrival_rates, _wait_times_by_esi, _lengths_of_visit_by_esi = self.data
                 # Simulation time is minutes; time zero is midnight.
                 now = self.env.now()
@@ -40,9 +41,10 @@ class ArrivalGenerator(sim.Component):
 
             # Create a Patient component.
             Patient(
-                triage=self.triage,
-                providers=self.providers,
+                staff=self.staff,
                 beds=self.beds,
+                testing=self.testing,
+                hospital_beds=self.hospital_beds,
                 metrics=self.metrics,
                 data=self.data
             )
