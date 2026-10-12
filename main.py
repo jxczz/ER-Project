@@ -1,4 +1,3 @@
-import random
 import time
 from pathlib import Path
 import salabim as sim
@@ -6,10 +5,9 @@ import salabim as sim
 # Just using generator-based simulation.
 sim.yieldless(False)
 
-# Seed both Python's random and Salabim's internal RNG so a single run is repeatable given the seed.
+# The seed is applied when the environment is created (Salabim reseeds Python's random and numpy
+# there), so a run can be repeated by reusing the printed seed.
 seed = int(time.time())
-random.seed(seed)
-sim.random_seed(seed)
 
 # Environment/resources, arrival process, and metrics collection.
 from simulation.environment import create_environment
@@ -21,7 +19,7 @@ from config import SIMULATION_TIME, DATASET_PATH, ARRIVALS_PER_DAY, ANIMATE
 print("Seed: ", seed)
 
 # Create the environment and shared resources used by all patients.
-env, staff, beds, testing, hospital_beds = create_environment()
+env, staff, beds, testing, hospital_beds = create_environment(random_seed=seed)
 
 if ANIMATE:
     from simulation.animation import setup_animation

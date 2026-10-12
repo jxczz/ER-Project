@@ -21,8 +21,10 @@ STAGE_QUEUES = [
 ]
 
 
-def create_environment():
-    env = sim.Environment(trace = False) # just creating a new simulated environment, trace -> False to avoid printing every event to console
+def create_environment(random_seed=None):
+    # Salabim reseeds Python's random (and numpy) when the Environment is created, so the run's seed
+    # must be passed here. None keeps Salabim's fixed default seed (1234567).
+    env = sim.Environment(trace = False, random_seed = random_seed) # just creating a new simulated environment, trace -> False to avoid printing every event to console
 
     # Queues used for animation/visualization. Patients will enter/leave these during their journey.
     for name, _label in STAGE_QUEUES:
