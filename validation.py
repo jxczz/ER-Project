@@ -318,8 +318,11 @@ def main():
         args.reps, args.days, args.warmup_days, args.first_seed, max_runoff_days=args.max_runoff_days
     )
     # Saved before any printing, so a failure while reporting cannot lose a long run.
+    # The run settings go on every row, so compare_runs.py can check that two runs are comparable.
     if args.save_csv:
-        replications.to_csv(args.save_csv, index=False)
+        replications.assign(
+            days=args.days, warmup_days=args.warmup_days, max_runoff_days=args.max_runoff_days
+        ).to_csv(args.save_csv, index=False)
     table = compare(replications, targets)
 
     seeds = sorted(replications["seed"].unique())

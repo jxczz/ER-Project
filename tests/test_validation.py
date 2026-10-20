@@ -269,8 +269,12 @@ class SaveCsvTest(unittest.TestCase):
                 "d2p_median", "d2p_mean", "d2p_p90", "d2p_n",
                 "lov_median", "lov_mean", "lov_p90", "lov_n",
                 "observed_arrivals", "unresolved", "runoff_minutes", "mean_bed_occupancy",
+                "days", "warmup_days", "max_runoff_days",
             ])
             self.assertEqual(len(saved), 12)
+            self.assertEqual(
+                saved[["days", "warmup_days", "max_runoff_days"]].drop_duplicates().values.tolist(), [[2, 1, 7]]
+            )
 
     def test_missing_directory_is_rejected_before_running(self):
         with tempfile.TemporaryDirectory() as directory:
