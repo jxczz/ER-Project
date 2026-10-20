@@ -88,31 +88,54 @@ class NhamcsTargetsTests(unittest.TestCase):
         self.assertEqual(list(self.df.columns), ["IMMEDR", "WAITTIME", "LOV", "PATWT"])
 
 
-class WarmupExclusionTests(unittest.TestCase):
+class StandInPatient:
+    def __init__(self, esi):
+        self.esi = esi
+
+
+class ObservationWindowTests(unittest.TestCase):
     def setUp(self):
         previous_yieldless = sim.yieldless()
         sim.yieldless(False)
         self.addCleanup(sim.yieldless, previous_yieldless)
 
-    def test_pre_warmup_arrivals_are_dropped(self):
+    def test_only_window_arrivals_are_kept_and_pending_drops_to_zero(self):
         env = sim.Environment(trace=False)
         metrics = TimedESI(env)
+        before, at_start, inside, at_end = (StandInPatient(3), StandInPatient(2), StandInPatient(3), StandInPatient(3))
 
+        # The window is [80, 200).
+        env.run(till=50)
+        metrics.record_arrival(before)
+        env.run(till=80)
+        metrics.record_arrival(at_start)  # exactly at the window start: observed
         env.run(till=100)
-        metrics.record_wait_time(3, 30)  # arrived at 70, before the warm-up ends at 80
-        metrics.record_wait_time(3, 5)   # arrived at 95
+        metrics.record_arrival(inside)
         env.run(till=200)
-        metrics.record_length_of_visit(3, 150)  # arrived at 50
-        metrics.record_length_of_visit(3, 100)  # arrived at 100
-        metrics.record_length_of_visit(2, 120)  # arrived at 80, exactly at the warm-up end
+        metrics.record_arrival(at_end)    # exactly at the window end: not observed
+        self.assertEqual(metrics.pending(80, 200), 2)
 
-        waits, visits = metrics.observations_since(80)
-        self.assertEqual(waits[3], [5])
-        self.assertEqual(visits[3], [100])
-        self.assertEqual(visits[2], [120])
+        env.run(till=230)
+        for patient, arrived in ((before, 50), (at_start, 80), (inside, 100), (at_end, 200)):
+            metrics.record_wait_time(patient.esi, env.now() - arrived)
+        self.assertEqual(metrics.pending(80, 200), 2)  # examined but not yet departed
+
+        env.run(till=300)
+        for patient, arrived in ((before, 50), (at_start, 80), (inside, 100)):
+            metrics.record_length_of_visit(patient.esi, env.now() - arrived)
+            metrics.record_departure(patient)
+        self.assertEqual(metrics.pending(80, 200), 0)
+        self.assertEqual(metrics.in_ed, {at_end})
+
+        waits, visits = metrics.observations_between(80, 200)
+        self.assertEqual(waits[3], [130])
+        self.assertEqual(waits[2], [150])
+        self.assertEqual(visits[3], [200])
+        self.assertEqual(visits[2], [220])
         # The parent ESI lists still record everything.
-        self.assertEqual(metrics.wait_times[3], [30, 5])
-        self.assertEqual(metrics.lengths_of_visit[3], [150, 100])
+        self.assertEqual(metrics.wait_times[3], [180, 130, 30])
+        self.assertEqual(metrics.lengths_of_visit[3], [250, 200])
+        self.assertEqual(metrics.arrivals[3], 3)
 
 
 class RunReplicationsSmokeTest(unittest.TestCase):
@@ -139,6 +162,20 @@ class RunReplicationsSmokeTest(unittest.TestCase):
         self.assertEqual(len(results), 10)
         self.assertGreater(results["d2p_n"].sum(), 0)
         self.assertGreater(results["lov_n"].sum(), 0)
+        for column in ("observed_arrivals", "unresolved", "runoff_minutes"):
+            self.assertIn(column, results.columns)
+        # The run-off is a property of the replication, so it is the same on each of its rows.
+        self.assertTrue((results.groupby("rep")["runoff_minutes"].nunique() == 1).all())
+
+    def test_no_censoring_every_observed_patient_is_measured(self):
+        results = run_replications(1, days=2, warmup_days=1)
+        self.assertGreater(results["observed_arrivals"].sum(), 0)
+        for row in results.itertuples():
+            with self.subTest(esi=row.esi):
+                self.assertEqual(row.lov_n, row.observed_arrivals)
+                self.assertEqual(row.d2p_n, row.observed_arrivals)
+                self.assertEqual(row.unresolved, 0)
+                self.assertGreaterEqual(row.runoff_minutes, 0)
 
 
 if __name__ == "__main__":

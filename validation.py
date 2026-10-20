@@ -99,14 +99,22 @@ def nhamcs_targets(df):
 
 
 class TimedESI(ESI):
-    """ESI metrics that also store each door-to-provider and length-of-visit observation's arrival time."""
+    """
+    ESI metrics that also store each patient's arrival time, and each door-to-provider and
+    length-of-visit observation's arrival time.
+    """
 
     def __init__(self, env):
         super().__init__()
         self.env = env
+        self.arrival_times = {}
         # (arrival time, value) pairs per ESI level.
         self.timed_wait_times = {level: [] for level in LEVELS}
         self.timed_lengths_of_visit = {level: [] for level in LEVELS}
+
+    def record_arrival(self, patient):
+        super().record_arrival(patient)
+        self.arrival_times[patient] = self.env.now()
 
     def record_wait_time(self, esi_level, wait_time):
         super().record_wait_time(esi_level, wait_time)
@@ -116,34 +124,58 @@ class TimedESI(ESI):
         super().record_length_of_visit(esi_level, length_of_visit)
         self.timed_lengths_of_visit[esi_level].append((self.env.now() - length_of_visit, length_of_visit))
 
-    def observations_since(self, start):
-        """Door-to-provider and LOV values by ESI for patients who arrived at or after `start`."""
-        def after(timed):
-            return {level: [value for arrival, value in pairs if arrival >= start] for level, pairs in timed.items()}
-        return after(self.timed_wait_times), after(self.timed_lengths_of_visit)
+    def arrived_between(self, patients, start, end):
+        """The given patients who arrived in [start, end)."""
+        return [patient for patient in patients if start <= self.arrival_times[patient] < end]
+
+    def in_window(self, start, end):
+        """Patients still in the ED who arrived in [start, end)."""
+        return self.arrived_between(self.in_ed, start, end)
+
+    def pending(self, start, end):
+        """Number of patients still in the ED who arrived in [start, end)."""
+        return len(self.in_window(start, end))
+
+    def observations_between(self, start, end):
+        """Door-to-provider and LOV values by ESI for patients who arrived in [start, end)."""
+        def within(timed):
+            return {
+                level: [value for arrival, value in pairs if start <= arrival < end]
+                for level, pairs in timed.items()
+            }
+        return within(self.timed_wait_times), within(self.timed_lengths_of_visit)
 
 
 def _median(values):
     return statistics.median(values) if values else float("nan")
 
 
-def run_replications(n_reps, days, warmup_days, first_seed=1):
+def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7):
     """
-    Run `n_reps` independent replications (seeds first_seed, first_seed + 1, ...) of `days` days each,
-    set up as in main.py, and summarize patients who arrived after the warm-up.
+    Run `n_reps` independent replications (seeds first_seed, first_seed + 1, ...), set up as in
+    main.py. The observed patients are those who arrive between day `warmup_days` and day `days`.
+    After day `days` the run continues unchanged (arrivals and the hospital census keep going) until
+    every observed patient has left the ED, or for at most `max_runoff_days` more days.
 
     Returns a tidy DataFrame with one row per replication and ESI level: rep, seed, esi,
-    d2p_median, d2p_n, lov_median, lov_n, and mean_bed_occupancy (the replication's time-weighted
-    mean of claimed ED beds over the whole run, warm-up included; the same on every row of a rep).
+    d2p_median, d2p_n, lov_median, lov_n, observed_arrivals (arrivals in the window), unresolved
+    (observed patients still in the ED when the run-off cap was hit; should be 0), runoff_minutes
+    (minutes run past day `days`), and mean_bed_occupancy (the time-weighted mean of claimed ED beds
+    over the whole run, warm-up and run-off included). The last two are the same on every row of a rep.
     """
-    if n_reps < 1 or days <= 0 or not 0 <= warmup_days < days:
-        raise ValueError(f"need n_reps >= 1 and 0 <= warmup_days < days, got {n_reps}, {days}, {warmup_days}")
+    if n_reps < 1 or days <= 0 or not 0 <= warmup_days < days or not max_runoff_days >= 0:
+        raise ValueError(
+            "need n_reps >= 1, 0 <= warmup_days < days and max_runoff_days >= 0, "
+            f"got {n_reps}, {days}, {warmup_days}, {max_runoff_days}"
+        )
 
     previous_animate = config.ANIMATE
     config.ANIMATE = False
     try:
         data = ERDataReader(config.DATASET_PATH, arrivals_per_day=config.ARRIVALS_PER_DAY).load_and_prepare()
         warmup_end = warmup_days * MINUTES_PER_DAY
+        cutoff = days * MINUTES_PER_DAY
+        runoff_cap = cutoff + max_runoff_days * MINUTES_PER_DAY
         rows = []
         for i in range(n_reps):
             seed = first_seed + i
@@ -154,12 +186,19 @@ def run_replications(n_reps, days, warmup_days, first_seed=1):
                 staff=staff, beds=beds, testing=testing, hospital_beds=hospital_beds,
                 metrics=metrics, data=data, env=env,
             )
-            env.run(till=days * MINUTES_PER_DAY)
+            env.run(till=cutoff)
 
-            # Right-censoring: patients still in the ED at the end have no length of visit (and those
-            # not yet examined have no door-to-provider time), so they are not counted. This biases
-            # both measures slightly low, most for the longest visits near the end of the run.
-            waits, visits = metrics.observations_since(warmup_end)
+            # Observation window and run-off: only patients arriving in [warmup_end, cutoff) are
+            # observed. The run then continues as before, so the ED stays realistically loaded, until
+            # all of them have left. Each observed patient then has a door-to-provider time and a
+            # length of visit, so long visits are not lost to right-censoring at the end of the run.
+            while metrics.pending(warmup_end, cutoff) > 0 and env.now() < runoff_cap:
+                env.run(till=min(env.now() + 60, runoff_cap))
+
+            waits, visits = metrics.observations_between(warmup_end, cutoff)
+            observed = [patient.esi for patient in metrics.arrived_between(metrics.arrival_times, warmup_end, cutoff)]
+            unresolved = [patient.esi for patient in metrics.in_window(warmup_end, cutoff)]
+            runoff_minutes = env.now() - cutoff
             occupancy = beds.claimed_quantity.mean()
             for level in LEVELS:
                 rows.append({
@@ -170,6 +209,9 @@ def run_replications(n_reps, days, warmup_days, first_seed=1):
                     "d2p_n": len(waits[level]),
                     "lov_median": _median(visits[level]),
                     "lov_n": len(visits[level]),
+                    "observed_arrivals": observed.count(level),
+                    "unresolved": unresolved.count(level),
+                    "runoff_minutes": runoff_minutes,
                     "mean_bed_occupancy": occupancy,
                 })
     finally:
@@ -205,16 +247,20 @@ def main():
     parser.add_argument("--days", type=float, default=14)
     parser.add_argument("--warmup-days", type=float, default=2)
     parser.add_argument("--first-seed", type=int, default=1)
+    parser.add_argument("--max-runoff-days", type=float, default=7)
     args = parser.parse_args()
 
     targets = nhamcs_targets(pd.read_parquet(ERDataReader(config.DATASET_PATH).filepath))
-    replications = run_replications(args.reps, args.days, args.warmup_days, args.first_seed)
+    replications = run_replications(
+        args.reps, args.days, args.warmup_days, args.first_seed, max_runoff_days=args.max_runoff_days
+    )
     table = compare(replications, targets)
 
     seeds = sorted(replications["seed"].unique())
     print(
-        f"Replications: {args.reps}, {args.days:g} days each, first {args.warmup_days:g} days warm-up "
-        f"(excluded by arrival time); seeds {', '.join(str(s) for s in seeds)}"
+        f"Replications: {args.reps}; patients arriving between day {args.warmup_days:g} and day "
+        f"{args.days:g} are observed; the run continues until all of them leave (at most "
+        f"{args.max_runoff_days:g} extra days); seeds {', '.join(str(s) for s in seeds)}"
     )
     print("Times in minutes. Simulation: mean [min, max] across replications of each replication's median.")
     print("NHAMCS: PATWT-weighted median [25th, 75th percentile], unweighted n; point estimates only.\n")
@@ -237,9 +283,19 @@ def main():
         print(view.to_string())
         print()
 
-    occupancy = replications.groupby("rep")["mean_bed_occupancy"].first()
+    by_rep = replications.groupby("rep")
+    runoff = by_rep["runoff_minutes"].first()
+    print(f"Run-off past day {args.days:g}: mean {runoff.mean():.1f} min, max {runoff.max():.1f} min")
+    unresolved = int(replications["unresolved"].sum())
+    print(f"Observed patients still in the ED at the run-off cap, all replications: {unresolved}")
+    if unresolved > 0:
+        print(
+            f"WARNING: {unresolved} observed patient(s) were still in the ED after {args.max_runoff_days:g} "
+            "run-off days; their visits are missing, so the results are still right-censored."
+        )
+    occupancy = by_rep["mean_bed_occupancy"].first()
     print(
-        f"Mean ED bed occupancy (whole run incl. warm-up), averaged over replications: "
+        f"Mean ED bed occupancy (whole run incl. warm-up and run-off), averaged over replications: "
         f"{occupancy.mean():.2f} of {config.NUM_BEDS} beds"
     )
     print(
