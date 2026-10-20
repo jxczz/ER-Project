@@ -1,8 +1,18 @@
+import math
 import random
 import salabim as sim
 import config as cfg
 from simulation.diagnostic_test import DiagnosticTest
 from simulation.hospital import InpatientStay
+
+Z75 = 0.6744897501960817  # 75th percentile of the standard normal
+
+
+def lognormal_params_from_median_iqr(median, q1, q3):
+    """Return (mu, sigma) of the lognormal with this median whose log-scale IQR width matches q1..q3."""
+    if not all(math.isfinite(value) for value in (median, q1, q3)) or not 0 < q1 < median < q3:
+        raise ValueError(f"need finite 0 < q1 < median < q3, got q1={q1}, median={median}, q3={q3}")
+    return math.log(median), (math.log(q3) - math.log(q1)) / (2 * Z75)
 
 
 class Patient(sim.Component):
@@ -150,7 +160,8 @@ class Patient(sim.Component):
         # TRIAGE (triage staff). FIFO: acuity is not known until triage is done.
         yield from self._acquire("triage", self.env.q_wait_triage, self.staff["triage"])
         yield from self._enter_stage(self.env.q_in_triage)
-        yield self.hold(random.expovariate(1.0 / cfg.MEAN_TRIAGE_TIME))
+        mu, sigma = lognormal_params_from_median_iqr(cfg.TRIAGE_TIME_MEDIAN, *cfg.TRIAGE_TIME_IQR)
+        yield self.hold(random.lognormvariate(mu, sigma))
         self.release(self.staff["triage"])
 
         # BED. Held from here until discharge/transfer; every later stage happens in the bed.

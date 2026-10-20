@@ -12,7 +12,11 @@ NUM_BEDS = 25
 
 # These are in minutes and can be adjusted at any time if no dataset is provided.
 MEAN_ARRIVAL_TIME = 16  # ~90 arrivals/day, matching the NHAMCS average volume
-MEAN_TRIAGE_TIME = 5
+# Triage duration (minutes), lognormal fitted to the median and IQR from "Emergency department
+# triage performance timing", a multicenter study of 1,114 triages in 11 Italian EDs
+# (Int Emerg Nurs, PMID 26796287).
+TRIAGE_TIME_MEDIAN = 2.58
+TRIAGE_TIME_IQR = (1.36, 4.35)
 MEAN_EXAM_TIME = 15
 MEAN_DIAGNOSIS_TIME = 10
 

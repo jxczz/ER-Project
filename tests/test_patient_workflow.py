@@ -1,3 +1,4 @@
+import math
 import random
 import unittest
 from unittest.mock import patch
@@ -12,10 +13,12 @@ from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
 from simulation.patient import Patient
 
-# Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly.
+# Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly, and
+# random.lognormvariate (triage) to return the median.
 # Powers of two keep the timeline arithmetic exact.
 MEANS = dict(
-    MEAN_TRIAGE_TIME=1,
+    TRIAGE_TIME_MEDIAN=1,
+    TRIAGE_TIME_IQR=(0.5, 2),
     MEAN_EXAM_TIME=2,
     MEAN_DIAGNOSIS_TIME=1,
     MEAN_TREATMENT_TIME={level: 2 for level in range(1, 6)},
@@ -69,6 +72,7 @@ class PatientWorkflowTests(unittest.TestCase):
             **MEANS,
         ))
         self.patch(patch("simulation.patient.random.expovariate", side_effect=lambda rate: 1 / rate))
+        self.patch(patch("simulation.patient.random.lognormvariate", side_effect=lambda mu, sigma: math.exp(mu)))
 
         staff = dict.fromkeys(("triage", "exam", "diagnosis", "treatment", "extra_treatment", "disposition"), 1)
         with patch.multiple(
