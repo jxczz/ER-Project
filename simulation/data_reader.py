@@ -4,6 +4,10 @@ from pathlib import Path
 import pandas as pd
 
 
+# NHAMCS ARREMS codes for "arrived by ambulance": 1 = yes, 2 = no (-8/-9 are unknown/blank).
+ARRIVAL_MODE_CODES = {"ambulance": 1, "walk_in": 2}
+
+
 class ERDataReader:
     """
     A class to read, clean, and process emergency room (ER) patient data from various file formats.
@@ -115,6 +119,20 @@ class ERDataReader:
             raise ValueError("NHAMCS acuity probabilities require positive weights for IMMEDR 1-5")
         self.esi_probs = totals / totals.sum()
 
+        # The same, separately for ambulance (ARREMS 1) and walk-in (ARREMS 2) arrivals. Records with
+        # an unknown arrival mode only count toward the overall probabilities above.
+        self.esi_probs_by_mode = None
+        if "arrems" in self.df.columns:
+            arrems = pd.to_numeric(self.df["arrems"], errors="coerce")
+            by_mode = {}
+            for mode, code in ARRIVAL_MODE_CODES.items():
+                in_mode = valid & arrems.eq(code)
+                mode_totals = weights[in_mode].groupby(levels[in_mode]).sum().reindex(range(1, 6), fill_value=0)
+                if mode_totals.sum() <= 0:
+                    raise ValueError(f"NHAMCS {mode} acuity probabilities require positive weights for IMMEDR 1-5")
+                by_mode[mode] = mode_totals / mode_totals.sum()
+            self.esi_probs_by_mode = by_mode
+
     def build_hourly_arrival_rates(self):
         """Estimate a national mean ED profile from the full NHAMCS sample."""
         weights = pd.to_numeric(self.df["patwt"], errors="coerce")
@@ -137,6 +155,24 @@ class ERDataReader:
         # Spread the daily volume over the hours using the known-time NHAMCS profile
         # (this also redistributes unknown-time visits).
         self.hourly_arrival_rates = (daily_volume * hourly_weights / hourly_weights.sum()).tolist()
+
+        # Share of each hour's arrivals that come by ambulance, among visits with a known arrival mode.
+        # An hour without any such visits uses the share over all hours.
+        self.ambulance_share_by_hour = None
+        if "arrems" in self.df.columns:
+            arrems = pd.to_numeric(self.df["arrems"], errors="coerce")
+            known = valid & arrems.isin(list(ARRIVAL_MODE_CODES.values()))
+            hours = hhmm[known].floordiv(100).astype(int)
+            known_weights = weights[known].groupby(hours).sum().reindex(range(24), fill_value=0)
+            ambulance = weights[known].where(arrems[known].eq(ARRIVAL_MODE_CODES["ambulance"]), 0)
+            ambulance_weights = ambulance.groupby(hours).sum().reindex(range(24), fill_value=0)
+            if known_weights.sum() <= 0:
+                raise ValueError("NHAMCS ambulance shares require positive weights for ARREMS 1-2")
+            overall_share = ambulance_weights.sum() / known_weights.sum()
+            self.ambulance_share_by_hour = [
+                float(amb / total) if total > 0 else float(overall_share)
+                for amb, total in zip(ambulance_weights, known_weights)
+            ]
         # Preserve the existing valid-arrival-time subset for clinical distributions.
         self.df = self.df.loc[valid].copy()
 
@@ -169,6 +205,9 @@ class ERDataReader:
         - hourly_arrival_rates: expected arrivals per hour, indexed 0-23
         - wait_times_by_esi: dict mapping ESI -> observed wait times
         - lengths_of_visit_by_esi: dict mapping ESI -> observed total visit lengths
+        - arrival_modes: None if the dataset has no ARREMS column, otherwise a dict with
+          "ambulance_share_by_hour" (24 shares of arrivals that come by ambulance) and
+          "esi_weights" ({"ambulance": [...], "walk_in": [...]}, matching esi_levels)
         """
         esi_levels = self.esi_probs.index.tolist()
         esi_weights = self.esi_probs.values.tolist()
@@ -186,12 +225,22 @@ class ERDataReader:
             if visit_lengths:
                 lengths_of_visit_by_esi[level] = visit_lengths
 
+        arrival_modes = None
+        if self.esi_probs_by_mode is not None and self.ambulance_share_by_hour is not None:
+            arrival_modes = {
+                "ambulance_share_by_hour": self.ambulance_share_by_hour,
+                "esi_weights": {
+                    mode: probs.reindex(esi_levels).tolist() for mode, probs in self.esi_probs_by_mode.items()
+                },
+            }
+
         return (
             esi_levels,
             esi_weights,
             self.hourly_arrival_rates,
             wait_times_by_esi,
             lengths_of_visit_by_esi,
+            arrival_modes,
         )
 
     def load_and_prepare(self):

@@ -67,6 +67,15 @@ HOSPITAL_DISCHARGE_HOURS = (11, 17)  # hospital patients leave between these hou
 
 # Most patients are ESI 3/4, barely any are ESI 1.
 ESI_WEIGHTS_SYNTHETIC = [3, 12, 40, 35, 10]  # ESI 1..5
+
+# Ambulance arrivals skip triage and go straight to the ED bed queue (still ESI priority). With a
+# dataset, the ambulance share by hour and the acuity mix of each arrival mode come from NHAMCS ARREMS.
+# False makes every patient a walk-in, using the overall acuity mix.
+AMBULANCE_ARRIVALS = True
+# Synthetic mode only: share of arrivals by ambulance and their acuity (NHAMCS 2022 ambulance arrivals,
+# ~17.5%). Walk-ins use ESI_WEIGHTS_SYNTHETIC.
+AMBULANCE_SHARE_SYNTHETIC = 0.175
+ESI_WEIGHTS_AMBULANCE_SYNTHETIC = [4, 29, 54, 11, 2]  # ESI 1..5
 SIMULATION_TIME = 5000
 
 DATASET_PATH = "nhamcs/nhamcs2022.parquet"

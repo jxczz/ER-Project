@@ -89,7 +89,7 @@ class ConfiguredArrivalVolumeTests(unittest.TestCase):
         with patch("simulation.arrival_generator.Patient", side_effect=record_patient):
             ArrivalGenerator(
                 staff=None, beds=None, testing=None, hospital_beds=None, metrics=None,
-                data=([1, 2, 3, 4, 5], [0.2] * 5, rates, {}, {}), env=env,
+                data=([1, 2, 3, 4, 5], [0.2] * 5, rates, {}, {}, None), env=env,
             )
             env.run(till=days * 24 * 60)
 

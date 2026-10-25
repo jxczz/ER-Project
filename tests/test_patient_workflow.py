@@ -439,7 +439,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertEqual(self.metrics.non_ed_admissions, {"admitted": 0, "turned_away": 0})
 
     def test_acuity_is_sampled_at_creation_from_data(self):
-        data = ([2], [1.0], {}, {2: [999.0]}, {2: [9999.0]})
+        data = ([2], [1.0], {}, {2: [999.0]}, {2: [9999.0]}, None)
         with patch("simulation.patient.random.choices", return_value=[2]) as acuity:
             patient = self.patient(esi=None, data=data)
             self.assertEqual(patient.esi, 2)
@@ -450,6 +450,56 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertEqual(self.metrics.lengths_of_visit[2], [5.0])
         self.assert_departed(patient)
 
+
+    def test_ambulance_patient_skips_triage(self):
+        patient = self.patient(ambulance=True)
+
+        # No triage: bed and exam at 0 (exam 0-2), diagnosis 2-3, discharge 3-4.
+        self.env.run(till=0.5)
+        self.assert_claims(patient, staff="exam", bed=True)
+        self.assertEqual(self.metrics.wait_times[3], [0.0])
+        self.env.run(till=5)
+        self.assertNotIn("triage", self.metrics.stage_waits)
+        self.assertEqual(self.metrics.lengths_of_visit[3], [4.0])
+        self.assertEqual(self.metrics.by_arrival_mode["ambulance"]["wait_times"], [0.0])
+        self.assertEqual(self.metrics.by_arrival_mode["ambulance"]["lengths_of_visit"], [4.0])
+        self.assertEqual(self.metrics.by_arrival_mode["walk_in"]["lengths_of_visit"], [])
+        self.assert_departed(patient)
+
+    def test_ambulance_patient_waits_for_a_bed_by_esi(self):
+        self.block(self.beds, 10)  # the only ED bed frees up at 10
+        ambulance = self.patient(esi=4, ambulance=True)  # in the bed queue from 0
+        walk_in = self.patient(esi=2)  # in the bed queue from 1, after triage
+
+        # Ambulance arrival gets no priority of its own: the sicker walk-in gets the bed first.
+        self.env.run(till=10.5)
+        self.assert_claims(walk_in, staff="exam", bed=True)
+        self.assertIn(ambulance, self.beds.requesters())
+
+    def test_acuity_is_sampled_from_the_arrival_mode_mix(self):
+        arrival_modes = {
+            "ambulance_share_by_hour": [0.5] * 24,
+            "esi_weights": {"ambulance": [0.7, 0.3], "walk_in": [0.1, 0.9]},
+        }
+        data = ([1, 2], [0.2, 0.8], {}, {}, {}, arrival_modes)
+        cases = (
+            (True, True, [0.7, 0.3]),
+            (False, True, [0.1, 0.9]),
+            (True, False, [0.2, 0.8]),  # ambulance arrivals turned off: the overall mix
+        )
+        for ambulance, enabled, weights in cases:
+            with self.subTest(ambulance=ambulance, enabled=enabled):
+                with patch.object(cfg, "AMBULANCE_ARRIVALS", enabled), \
+                        patch("simulation.patient.random.choices", return_value=[2]) as acuity:
+                    self.patient(esi=None, data=data, ambulance=ambulance)
+                acuity.assert_called_once_with([1, 2], weights=weights, k=1)
+
+    def test_synthetic_ambulance_acuity_uses_ambulance_weights(self):
+        with patch("simulation.patient.random.choices", return_value=[2]) as acuity:
+            self.patient(esi=None, ambulance=True)
+            self.patient(esi=None)
+        self.assertEqual(acuity.call_args_list[0].kwargs["weights"], cfg.ESI_WEIGHTS_AMBULANCE_SYNTHETIC)
+        self.assertEqual(acuity.call_args_list[1].kwargs["weights"], cfg.ESI_WEIGHTS_SYNTHETIC)
 
 
 class PatientAccountingTests(unittest.TestCase):

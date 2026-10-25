@@ -149,6 +149,9 @@ class NhamcsTargetsTests(unittest.TestCase):
 class StandInPatient:
     def __init__(self, esi):
         self.esi = esi
+        self.ambulance = False
+        self.door_to_provider = None
+        self.length_of_visit = None
 
 
 class ObservationWindowTests(unittest.TestCase):

@@ -5,6 +5,12 @@ from simulation.environment import STAGE_QUEUES
 # Stages before a patient has an ED bed; every later stage is spent holding one.
 STAGES_WITHOUT_BED = {"q_wait_triage", "q_in_triage", "q_wait_bed"}
 
+ARRIVAL_MODES = {"ambulance": "Ambulance", "walk_in": "Walk-in"}
+
+
+def arrival_mode(patient):
+    return "ambulance" if patient.ambulance else "walk_in"
+
 class ESI:
     def __init__(self):
         self.lengths_of_visit = {1: [], 2: [], 3: [], 4: [], 5: []}
@@ -22,13 +28,22 @@ class ESI:
         # Patient accounting: arrivals per ESI, and the patients currently in the ED.
         self.arrivals = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
         self.in_ed = set()
+        # By arrival mode: arrivals per ESI, and door-to-provider times and lengths of visit of finished visits.
+        self.by_arrival_mode = {
+            mode: {"arrivals": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}, "wait_times": [], "lengths_of_visit": []}
+            for mode in ARRIVAL_MODES
+        }
 
     def record_arrival(self, patient):
         self.arrivals[patient.esi] += 1
+        self.by_arrival_mode[arrival_mode(patient)]["arrivals"][patient.esi] += 1
         self.in_ed.add(patient)
 
     def record_departure(self, patient):
         self.in_ed.discard(patient)
+        by_mode = self.by_arrival_mode[arrival_mode(patient)]
+        by_mode["wait_times"].append(patient.door_to_provider)
+        by_mode["lengths_of_visit"].append(patient.length_of_visit)
 
     def check_accounting(self, env, beds):
         """
@@ -124,6 +139,25 @@ class ESI:
                     "Mean simulated LOV: ", round(statistics.mean(visits), 2), "min",
                     "Median simulated LOV: ", round(statistics.median(visits), 2), "min",
                 )
+
+        print("\nBy arrival mode:")
+        for mode, label in ARRIVAL_MODES.items():
+            by_mode = self.by_arrival_mode[mode]
+            arrived = sum(by_mode["arrivals"].values())
+            if not arrived:
+                continue
+            esi_mix = " ".join(
+                f"{level}:{count / arrived:.0%}" for level, count in by_mode["arrivals"].items()
+            )
+            line = f"  {label:<9} arrived {arrived:5d} (ESI {esi_mix})"
+            if by_mode["wait_times"]:
+                line += (
+                    f" | door-to-provider mean {statistics.mean(by_mode['wait_times']):6.1f}"
+                    f" median {statistics.median(by_mode['wait_times']):6.1f}"
+                    f" | LOV mean {statistics.mean(by_mode['lengths_of_visit']):6.1f}"
+                    f" median {statistics.median(by_mode['lengths_of_visit']):6.1f} min"
+                )
+            print(line)
 
         print("\nMean queue wait by stage (min):")
         # Report in patient-flow order; any unknown stage goes last.

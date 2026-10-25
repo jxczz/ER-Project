@@ -16,7 +16,7 @@ def lognormal_params_from_median_iqr(median, q1, q3):
 
 
 class Patient(sim.Component):
-    def setup(self, staff, beds, testing, hospital_beds, metrics, esi=None, data=None):
+    def setup(self, staff, beds, testing, hospital_beds, metrics, esi=None, data=None, ambulance=False):
         # One staff pool per stage, keyed by stage name.
         self.staff = staff
         self.beds = beds
@@ -27,6 +27,10 @@ class Patient(sim.Component):
         # If esi is provided explicitly, use it. Otherwise, assign ESI now.
         self.esi = esi
         self.data = data
+        # Ambulance arrivals skip triage and go straight to the ED bed queue.
+        self.ambulance = ambulance
+        self.door_to_provider = None
+        self.length_of_visit = None
         self.tests = []
         self.diagnosis_attempts = 0
         self.forced_admission = False
@@ -67,14 +71,17 @@ class Patient(sim.Component):
             self._anim_queue = new_queue
 
     def _assign_esi(self):
-        """Assign acuity at patient creation, preserving an explicit ESI."""
+        """Assign acuity at patient creation from this arrival mode's mix, preserving an explicit ESI."""
         if self.esi is None:
             if self.data is not None:
-                esi_levels, esi_weights, _hourly_arrival_rates, _wait_times_by_esi, _lengths_of_visit_by_esi = self.data
+                esi_levels, esi_weights, _hourly_arrival_rates, _wait_times_by_esi, _lengths_of_visit_by_esi, arrival_modes = self.data
+                if cfg.AMBULANCE_ARRIVALS and arrival_modes is not None:
+                    esi_weights = arrival_modes["esi_weights"]["ambulance" if self.ambulance else "walk_in"]
                 self.esi = random.choices(esi_levels, weights=esi_weights, k=1)[0]
             else:
                 # Fallback
-                self.esi = random.choices([1, 2, 3, 4, 5], weights=cfg.ESI_WEIGHTS_SYNTHETIC, k=1)[0]
+                weights = cfg.ESI_WEIGHTS_AMBULANCE_SYNTHETIC if self.ambulance else cfg.ESI_WEIGHTS_SYNTHETIC
+                self.esi = random.choices([1, 2, 3, 4, 5], weights=weights, k=1)[0]
 
     def animation_objects(self, *args, **kwargs):
         # Salabim passes `screen_coordinates` from AnimateQueue.
@@ -94,7 +101,8 @@ class Patient(sim.Component):
         def label(_t=None):
             if getattr(self, "esi", None) is None:
                 return "?"
-            return str(self.esi)
+            # "A" marks an ambulance arrival.
+            return f"A{self.esi}" if self.ambulance else str(self.esi)
 
         rect_kwargs = dict(
             spec=(-13, -8, 13, 8),
@@ -157,12 +165,14 @@ class Patient(sim.Component):
         self.metrics.record_arrival(self)
         self._anim_queue = None
 
-        # TRIAGE (triage staff). FIFO: acuity is not known until triage is done.
-        yield from self._acquire("triage", self.env.q_wait_triage, self.staff["triage"])
-        yield from self._enter_stage(self.env.q_in_triage)
-        mu, sigma = lognormal_params_from_median_iqr(cfg.TRIAGE_TIME_MEDIAN, *cfg.TRIAGE_TIME_IQR)
-        yield self.hold(random.lognormvariate(mu, sigma))
-        self.release(self.staff["triage"])
+        # TRIAGE (triage staff). FIFO: acuity is not known until triage is done. Ambulance arrivals
+        # skip triage and go straight to the bed queue.
+        if not self.ambulance:
+            yield from self._acquire("triage", self.env.q_wait_triage, self.staff["triage"])
+            yield from self._enter_stage(self.env.q_in_triage)
+            mu, sigma = lognormal_params_from_median_iqr(cfg.TRIAGE_TIME_MEDIAN, *cfg.TRIAGE_TIME_IQR)
+            yield self.hold(random.lognormvariate(mu, sigma))
+            self.release(self.staff["triage"])
 
         # BED. Held from here until discharge/transfer; every later stage happens in the bed.
         yield from self._acquire("bed", self.env.q_wait_bed, self.beds, self.esi)
@@ -171,7 +181,8 @@ class Patient(sim.Component):
         yield from self._acquire("exam", self.env.q_wait_exam, self.staff["exam"], self.esi)
         yield from self._enter_stage(self.env.q_in_exam)
         # Door-to-provider time.
-        self.metrics.record_wait_time(self.esi, self.env.now() - arrival_time)
+        self.door_to_provider = self.env.now() - arrival_time
+        self.metrics.record_wait_time(self.esi, self.door_to_provider)
         yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXAM_TIME))
         self.release(self.staff["exam"])
 
@@ -248,7 +259,7 @@ class Patient(sim.Component):
 
         # Leave the last queue so the box disappears properly
         self._safe_move(None)
-        length_of_visit = self.env.now() - arrival_time
-        self.metrics.record_length_of_visit(self.esi, length_of_visit)
+        self.length_of_visit = self.env.now() - arrival_time
+        self.metrics.record_length_of_visit(self.esi, self.length_of_visit)
         self.metrics.record_disposition(self.esi, self.outcome, self.forced_admission)
         self.metrics.record_departure(self)
