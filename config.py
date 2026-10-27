@@ -20,21 +20,31 @@ TRIAGE_TIME_IQR = (1.36, 4.35)
 MEAN_EXAM_TIME = 15
 MEAN_DIAGNOSIS_TIME = 10
 
-# Diagnostic testing. Each test type has its own pool (e.g. lab techs, scanners) and is ordered
-# after examination with a per-ESI probability. The patient keeps their bed while tests run.
+# Diagnostic testing. Each test type has its own pool (e.g. lab techs, scanners). Initial tests are
+# ordered after examination from INITIAL_TEST_WEIGHTS below. The patient keeps their bed while tests run.
 TEST_TYPES = {
     "lab": {
         "capacity": 3,
         "mean_time": 45,
-        "probability": {1: 0.95, 2: 0.9, 3: 0.75, 4: 0.3, 5: 0.1},
         "follow_up_probability": {1: 0.5, 2: 0.5, 3: 0.4, 4: 0.3, 5: 0.3},
     },
     "imaging": {
         "capacity": 2,
         "mean_time": 40,
-        "probability": {1: 0.9, 2: 0.75, 3: 0.5, 4: 0.25, 5: 0.05},
         "follow_up_probability": {1: 0.7, 2: 0.7, 3: 0.6, 4: 0.5, 5: 0.5},
     },
+}
+
+# Initial tests after examination, drawn jointly since lab and imaging are correlated. NHAMCS 2022
+# PATWT-weighted shares by IMMEDR 1-5 (used as ESI), excluding DIAGSCRN == 2 (item blank). lab = any
+# blood test (ABG BAC BMP BNP BUNCREAT CARDENZ CBC CMP BLOODCX DDIMER ELECTROL GLUCOSE LACTATE LFT
+# PTTINR OTHERBLD); imaging = ANYIMAGE. Follow-up probabilities above remain synthetic.
+INITIAL_TEST_WEIGHTS = {
+    1: {"none": 0.110, "lab": 0.107, "imaging": 0.084, "both": 0.699},
+    2: {"none": 0.095, "lab": 0.171, "imaging": 0.069, "both": 0.665},
+    3: {"none": 0.189, "lab": 0.160, "imaging": 0.168, "both": 0.483},
+    4: {"none": 0.568, "lab": 0.045, "imaging": 0.304, "both": 0.084},
+    5: {"none": 0.798, "lab": 0.058, "imaging": 0.095, "both": 0.049},
 }
 
 # A diagnosis can fail, which orders follow-up tests (from "follow_up_probability" above, at least

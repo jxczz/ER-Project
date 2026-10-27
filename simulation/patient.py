@@ -15,6 +15,16 @@ def lognormal_params_from_median_iqr(median, q1, q3):
     return math.log(median), (math.log(q3) - math.log(q1)) / (2 * Z75)
 
 
+INITIAL_TEST_COMBINATIONS = {"none": [], "lab": ["lab"], "imaging": ["imaging"], "both": ["lab", "imaging"]}
+
+
+def draw_initial_test_types(esi):
+    """Draw this ESI level's initial tests as one combination from INITIAL_TEST_WEIGHTS."""
+    weights = cfg.INITIAL_TEST_WEIGHTS[esi]
+    combination = random.choices(list(weights), weights=list(weights.values()), k=1)[0]
+    return list(INITIAL_TEST_COMBINATIONS[combination])
+
+
 class Patient(sim.Component):
     def setup(self, staff, beds, testing, hospital_beds, metrics, esi=None, data=None, ambulance=False):
         # One staff pool per stage, keyed by stage name.
@@ -138,13 +148,15 @@ class Patient(sim.Component):
 
     def _order_tests(self, follow_up=False):
         """Order tests and return them. Each is its own component, linked to this patient, that starts immediately."""
-        key = "follow_up_probability" if follow_up else "probability"
-        chances = {test_type: spec[key][self.esi] for test_type, spec in cfg.TEST_TYPES.items()}
-        ordered = [test_type for test_type, chance in chances.items() if random.random() < chance]
-        if follow_up and not ordered:
-            # A failed diagnosis always gets at least one follow-up test, picked by the follow-up chances.
-            weights = list(chances.values()) if sum(chances.values()) > 0 else None
-            ordered = random.choices(list(chances), weights=weights, k=1)
+        if not follow_up:
+            ordered = draw_initial_test_types(self.esi)
+        else:
+            chances = {test_type: spec["follow_up_probability"][self.esi] for test_type, spec in cfg.TEST_TYPES.items()}
+            ordered = [test_type for test_type, chance in chances.items() if random.random() < chance]
+            if not ordered:
+                # A failed diagnosis always gets at least one follow-up test, picked by the follow-up chances.
+                weights = list(chances.values()) if sum(chances.values()) > 0 else None
+                ordered = random.choices(list(chances), weights=weights, k=1)
 
         new_tests = [
             DiagnosticTest(

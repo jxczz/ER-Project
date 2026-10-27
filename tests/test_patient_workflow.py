@@ -11,7 +11,7 @@ from simulation.arrival_generator import ArrivalGenerator
 from simulation.data_reader import ERDataReader
 from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
-from simulation.patient import Patient
+from simulation.patient import INITIAL_TEST_COMBINATIONS, Patient
 
 # Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly, and
 # random.lognormvariate (triage) to return the median.
@@ -54,7 +54,6 @@ class PatientWorkflowTests(unittest.TestCase):
             name: {
                 "capacity": 1,
                 "mean_time": mean_time,
-                "probability": dict.fromkeys(range(1, 6), 0),
                 "follow_up_probability": dict.fromkeys(range(1, 6), 0),
             }
             for name, mean_time in (("lab", LAB_TIME), ("imaging", IMAGING_TIME))
@@ -63,6 +62,7 @@ class PatientWorkflowTests(unittest.TestCase):
             cfg,
             ANIMATE=False,
             TEST_TYPES=self.test_types,
+            INITIAL_TEST_WEIGHTS=self.initial_test_weights(()),
             TREATMENT_PROBABILITY=dict.fromkeys(range(1, 6), 0),
             ADMIT_PROBABILITY=dict.fromkeys(range(1, 6), 0),
             DIAGNOSIS_FAILURE_PROBABILITY=dict.fromkeys(range(1, 6), 0),
@@ -86,9 +86,16 @@ class PatientWorkflowTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    @staticmethod
+    def initial_test_weights(tests):
+        # Every ESI level always orders exactly this initial combination of tests.
+        (combination,) = [name for name, types in INITIAL_TEST_COMBINATIONS.items() if set(types) == set(tests)]
+        weights = dict.fromkeys(INITIAL_TEST_COMBINATIONS, 0)
+        weights[combination] = 1
+        return {level: weights for level in range(1, 6)}
+
     def route(self, tests=(), treatment=False, admit=False, follow_ups=(), diagnosis_fails=False):
-        for test_type in tests:
-            self.test_types[test_type]["probability"] = dict.fromkeys(range(1, 6), 1)
+        cfg.INITIAL_TEST_WEIGHTS = self.initial_test_weights(tests)
         for test_type in follow_ups:
             self.test_types[test_type]["follow_up_probability"] = dict.fromkeys(range(1, 6), 1)
         cfg.TREATMENT_PROBABILITY = dict.fromkeys(range(1, 6), 1 if treatment else 0)
