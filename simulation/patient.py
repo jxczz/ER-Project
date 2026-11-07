@@ -15,7 +15,16 @@ def lognormal_params_from_median_iqr(median, q1, q3):
     return math.log(median), (math.log(q3) - math.log(q1)) / (2 * Z75)
 
 
-INITIAL_TEST_COMBINATIONS = {"none": [], "lab": ["lab"], "imaging": ["imaging"], "both": ["lab", "imaging"]}
+INITIAL_TEST_COMBINATIONS = {
+    "none": [],
+    "lab": ["lab"],
+    "ct": ["ct"],
+    "other imaging": ["other imaging"],
+    "lab+ct": ["lab", "ct"],
+    "lab+other imaging": ["lab", "other imaging"],
+    "ct+other imaging": ["ct", "other imaging"],
+    "lab+ct+other imaging": ["lab", "ct", "other imaging"],
+}
 
 
 def draw_initial_test_types(esi):
@@ -155,8 +164,10 @@ class Patient(sim.Component):
             ordered = [test_type for test_type, chance in chances.items() if random.random() < chance]
             if not ordered:
                 # A failed diagnosis always gets at least one follow-up test, picked by the follow-up chances.
-                weights = list(chances.values()) if sum(chances.values()) > 0 else None
-                ordered = random.choices(list(chances), weights=weights, k=1)
+                # CT is never a follow-up, even when every chance is zero.
+                candidates = {test_type: chance for test_type, chance in chances.items() if test_type != "ct"}
+                weights = list(candidates.values()) if sum(candidates.values()) > 0 else None
+                ordered = random.choices(list(candidates), weights=weights, k=1)
 
         new_tests = [
             DiagnosticTest(

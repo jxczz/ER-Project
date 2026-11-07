@@ -273,9 +273,9 @@ def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7)
     - admitted_share and blocked_share: among observed patients who have left the ED, the share whose
       outcome was "admitted" (got a hospital bed) and "blocked" (to be admitted, but no hospital bed
       within the boarding cap, so discharged); NaN when there are none.
-    - util_<pool> for each staff pool, beds, each test pool and hospital_beds: the time-weighted mean
-      claimed quantity over the observation window [day `warmup_days`, day `days`) only, divided by the
-      pool's capacity. The same on every row of a rep.
+    - util_<pool> (pool name made column-safe, e.g. util_other_imaging) for each staff pool, beds, each
+      test pool and hospital_beds: the time-weighted mean claimed quantity over the observation window
+      [day `warmup_days`, day `days`) only, divided by the pool's capacity. The same on every row of a rep.
     - wait_<stage> (stage name made column-safe, e.g. wait_follow_up_lab_queue): the mean queue wait at
       that stage over the waits recorded in the observation window, i.e. waits that ended in it, not
       the waits of observed patients (record_stage_wait does not receive the patient). NaN when the
@@ -320,7 +320,7 @@ def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7)
             occupancy = beds.claimed_quantity.mean()
             pools = {**staff, "beds": beds, **testing, "hospital_beds": hospital_beds}
             utilization = {
-                f"util_{name}": windowed_utilization(pool, warmup_end, cutoff) for name, pool in pools.items()
+                f"util_{column_safe(name)}": windowed_utilization(pool, warmup_end, cutoff) for name, pool in pools.items()
             }
             stage_waits = metrics.stage_waits_between(warmup_end, cutoff)
             outcomes = [

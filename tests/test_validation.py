@@ -348,7 +348,7 @@ class RunReplicationsSmokeTest(unittest.TestCase):
 
     def test_diagnostics_are_in_range_and_do_not_change_outcomes(self):
         results = run_replications(2, days=2, warmup_days=1)
-        util_columns = [f"util_{name}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
+        util_columns = [f"util_{column_safe(name)}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
         for column in (*util_columns, "admitted_share", "blocked_share"):
             with self.subTest(column=column):
                 self.assertTrue(results[column].dropna().between(0, 1).all())
@@ -388,7 +388,7 @@ class SaveCsvTest(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertIn(path, output.getvalue())
             saved = pd.read_csv(path, dtype={"group": str})
-            util_columns = [f"util_{name}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
+            util_columns = [f"util_{column_safe(name)}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
             fixed = [
                 "rep", "seed", "group",
                 "d2p_median", "d2p_mean", "d2p_p90", "d2p_n",

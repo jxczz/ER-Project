@@ -1,7 +1,7 @@
 import math
 import random
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import salabim as sim
 
@@ -11,10 +11,10 @@ from simulation.arrival_generator import ArrivalGenerator
 from simulation.data_reader import ERDataReader
 from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
-from simulation.patient import INITIAL_TEST_COMBINATIONS, Patient
+from simulation.patient import INITIAL_TEST_COMBINATIONS, Patient, lognormal_params_from_median_iqr
 
 # Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly, and
-# random.lognormvariate (triage) to return the median.
+# random.lognormvariate (triage, CT room time and report delay) to return the median.
 # Powers of two keep the timeline arithmetic exact.
 MEANS = dict(
     TRIAGE_TIME_MEDIAN=1,
@@ -28,7 +28,9 @@ MEANS = dict(
     MEAN_TRANSFER_TIME=2,
 )
 LAB_TIME = 4
-IMAGING_TIME = 8
+OTHER_IMAGING_TIME = 8
+CT_ROOM_TIME = 2
+CT_REPORT_DELAY = 4
 
 
 class ResourceHolder(sim.Component):
@@ -56,7 +58,15 @@ class PatientWorkflowTests(unittest.TestCase):
                 "mean_time": mean_time,
                 "follow_up_probability": dict.fromkeys(range(1, 6), 0),
             }
-            for name, mean_time in (("lab", LAB_TIME), ("imaging", IMAGING_TIME))
+            for name, mean_time in (("lab", LAB_TIME), ("other imaging", OTHER_IMAGING_TIME))
+        }
+        self.test_types["ct"] = {
+            "capacity": 1,
+            "room_time_median": CT_ROOM_TIME,
+            "room_time_iqr": (CT_ROOM_TIME / 2, CT_ROOM_TIME * 2),
+            "report_delay_median": CT_REPORT_DELAY,
+            "report_delay_iqr": (CT_REPORT_DELAY / 2, CT_REPORT_DELAY * 2),
+            "follow_up_probability": dict.fromkeys(range(1, 6), 0),
         }
         self.patch(patch.multiple(
             cfg,
@@ -142,7 +152,7 @@ class PatientWorkflowTests(unittest.TestCase):
             self.assertEqual(len(queue), 0)
 
     def test_full_path_with_parallel_tests_treatment_and_admission(self):
-        self.route(tests=("lab", "imaging"), treatment=True, admit=True)
+        self.route(tests=("lab", "other imaging"), treatment=True, admit=True)
         self.block(self.hospital_beds, 20)  # the only hospital bed frees up at 20
         patient = self.patient()
 
@@ -153,12 +163,12 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_claims(patient, staff="exam", bed=True)
         self.assertEqual(self.metrics.wait_times[3], [1.0])
 
-        # Tests ordered at 3 run in parallel on their own pools: lab 3-7, imaging 3-11.
+        # Tests ordered at 3 run in parallel on their own pools: lab 3-7, other imaging 3-11.
         self.env.run(till=5)
-        self.assertEqual([t.test_type for t in patient.tests], ["lab", "imaging"])
+        self.assertEqual([t.test_type for t in patient.tests], ["lab", "other imaging"])
         self.assertTrue(all(t.patient is patient for t in patient.tests))
         self.assertIn(patient.tests[0], self.testing["lab"].claimers())
-        self.assertIn(patient.tests[1], self.testing["imaging"].claimers())
+        self.assertIn(patient.tests[1], self.testing["other imaging"].claimers())
         # Bed held during testing; the free provider is not requested until results are back.
         self.assert_claims(patient, bed=True)
         self.assertNotIn(patient, self.staff["diagnosis"].requesters())
@@ -198,6 +208,76 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertIn(patient.inpatient_stay, self.hospital_beds.claimers())
         self.env.run(till=84.1)
         self.assertEqual(self.hospital_beds.claimed_quantity(), 0)
+
+    def test_ct_holds_scanner_for_room_time_then_waits_for_report(self):
+        self.route(tests=("ct",))
+        self.beds.set_capacity(2)
+        first = self.patient()
+        second = self.patient(at=2.5)
+
+        # First: triage 0-1, exam 1-3, scanner 3-5 (room time), report 5-9, diagnosis 9-10, discharge 10-11.
+        self.env.run(till=4)
+        (first_ct,) = first.tests
+        self.assertEqual(first_ct.test_type, "ct")
+        self.assertIn(first_ct, self.testing["ct"].claimers())
+        self.assertFalse(first_ct.done())
+
+        # Second: triage 2.5-3.5, exam 3.5-5.5, then scans 5.5-7.5 during the first's report delay.
+        self.env.run(till=6)
+        self.assertNotIn(first_ct, self.testing["ct"].claimers())
+        self.assertFalse(first_ct.done())
+        self.assert_claims(first, bed=True)
+        self.assertIn(first, self.env.q_testing)
+        (second_ct,) = second.tests
+        self.assertIn(second_ct, self.testing["ct"].claimers())
+        self.env.run(till=8)
+        self.assertEqual(self.testing["ct"].claimed_quantity(), 0)
+        self.assertFalse(second_ct.done())
+
+        # The first result is ready only after room time + report delay: ordered at 3, 3 + 2 + 4 = 9.
+        self.env.run(till=8.9)
+        self.assertFalse(first_ct.done())
+        self.env.run(till=9.1)
+        self.assertTrue(first_ct.done())
+        self.assert_claims(first, staff="diagnosis", bed=True)
+
+        self.env.run(till=20)
+        self.assertEqual(self.metrics.stage_waits["ct queue"][3], [0.0, 0.0])
+        self.assertEqual(self.metrics.stage_waits["test results"][3], [6.0, 6.0])
+        self.assertEqual(self.metrics.lengths_of_visit[3], [11.0, 11.0])
+        self.assert_departed(first, second)
+
+    def test_ct_room_time_and_report_delay_are_drawn_from_configured_lognormals(self):
+        self.route(tests=("ct",))
+        with patch("simulation.diagnostic_test.random.lognormvariate", side_effect=[3.0, 5.0]) as draw:
+            patient = self.patient(ambulance=True)  # no triage, so only CT draws lognormals
+            # Exam 0-2, scanner 2-5, report 5-10.
+            self.env.run(till=4.9)
+            self.assertIn(patient.tests[0], self.testing["ct"].claimers())
+            self.env.run(till=5.1)
+            self.assertEqual(self.testing["ct"].claimed_quantity(), 0)
+            self.env.run(till=20)
+
+        spec = self.test_types["ct"]
+        self.assertEqual(draw.call_args_list, [
+            call(*lognormal_params_from_median_iqr(spec["room_time_median"], *spec["room_time_iqr"])),
+            call(*lognormal_params_from_median_iqr(spec["report_delay_median"], *spec["report_delay_iqr"])),
+        ])
+        self.assertEqual(self.metrics.stage_waits["test results"][3], [8.0])
+        self.assert_departed(patient)
+
+    def test_other_imaging_uses_exponential_mean_time(self):
+        self.route(tests=("other imaging",))
+        with patch("simulation.diagnostic_test.random.lognormvariate") as lognormal, \
+                patch("simulation.diagnostic_test.random.expovariate", side_effect=lambda rate: 1 / rate) as exponential:
+            patient = self.patient(ambulance=True)  # no triage, so no lognormal draw at all
+            self.env.run(till=20)
+
+        lognormal.assert_not_called()
+        self.assertIn(call(1.0 / OTHER_IMAGING_TIME), exponential.call_args_list)
+        self.assertEqual(self.metrics.stage_waits["test results"][3], [OTHER_IMAGING_TIME])
+        self.assertIn("other imaging queue", self.metrics.stage_waits)
+        self.assert_departed(patient)
 
     def test_minimal_path_skips_optional_steps(self):
         patient = self.patient(esi=4)
@@ -310,16 +390,16 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_departed(earlier, later)
 
     def test_failed_diagnosis_orders_follow_up_tests_then_rediagnoses(self):
-        self.route(follow_ups=("imaging",), diagnosis_fails=True)
+        self.route(follow_ups=("other imaging",), diagnosis_fails=True)
         patient = self.patient()
 
         # No initial tests: triage 0-1, exam 1-3, diagnosis 3-4 fails.
-        # Follow-up imaging 4-12 (bed held), second diagnosis 12-13 succeeds, discharge 13-14.
+        # Follow-up other imaging 4-12 (bed held), second diagnosis 12-13 succeeds, discharge 13-14.
         self.env.run(till=5)
         self.set_diagnosis_failure(False)
         self.assertEqual(patient.diagnosis_attempts, 1)
-        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("imaging", True)])
-        self.assertIn(patient.tests[0], self.testing["imaging"].claimers())
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("other imaging", True)])
+        self.assertIn(patient.tests[0], self.testing["other imaging"].claimers())
         self.assert_claims(patient, bed=True)
         self.assertNotIn(patient, self.staff["diagnosis"].requesters())
         self.assertIn(patient, self.env.q_testing)
@@ -334,17 +414,17 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assertFalse(patient.forced_admission)
         self.assertEqual(self.metrics.failed_diagnoses[3], 1)
         self.assertEqual(self.metrics.stage_waits["follow-up results"][3], [8.0])
-        self.assertIn("follow-up imaging queue", self.metrics.stage_waits)
+        self.assertIn("follow-up other imaging queue", self.metrics.stage_waits)
         self.assertNotIn("test results", self.metrics.stage_waits)
         self.assertEqual(self.metrics.lengths_of_visit[3], [14.0])
         self.assertEqual(self.metrics.dispositions[3], {"discharged": 1, "admitted": 0, "blocked": 0, "forced": 0})
         self.assert_departed(patient)
 
     def test_failing_last_diagnosis_attempt_forces_admission(self):
-        self.route(tests=("lab",), follow_ups=("imaging",), treatment=True, diagnosis_fails=True)
+        self.route(tests=("lab",), follow_ups=("other imaging",), treatment=True, diagnosis_fails=True)
         patient = self.patient()
 
-        # Initial lab 3-7, diagnosis 7-8 fails; follow-up imaging 8-16, diagnosis 16-17 fails.
+        # Initial lab 3-7, diagnosis 7-8 fails; follow-up other imaging 8-16, diagnosis 16-17 fails.
         # Admitted despite ADMIT_PROBABILITY 0: treatment 17-19, hospital bed free at 19, transfer 19-21.
         self.env.run(till=18)
         self.assertEqual(patient.diagnosis_attempts, 2)
@@ -354,7 +434,7 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_claims(patient, staff="disposition", bed=True)
 
         self.env.run(till=22)
-        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("lab", False), ("imaging", True)])
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("lab", False), ("other imaging", True)])
         self.assertEqual(self.metrics.failed_diagnoses[3], 2)
         self.assertEqual(self.metrics.lengths_of_visit[3], [21.0])
         self.assertEqual(self.metrics.dispositions[3], {"discharged": 0, "admitted": 1, "blocked": 0, "forced": 1})
@@ -362,13 +442,14 @@ class PatientWorkflowTests(unittest.TestCase):
 
     def test_failed_diagnosis_always_orders_a_follow_up(self):
         self.route(diagnosis_fails=True)
-        # Imaging is almost never drawn on its own and lab never is, so the guaranteed pick is imaging.
-        self.test_types["imaging"]["follow_up_probability"] = dict.fromkeys(range(1, 6), 1e-12)
+        # Other imaging is almost never drawn on its own and lab and CT never are, so the guaranteed
+        # pick is other imaging.
+        self.test_types["other imaging"]["follow_up_probability"] = dict.fromkeys(range(1, 6), 1e-12)
         patient = self.patient()
 
         self.env.run(till=5)
         self.set_diagnosis_failure(False)
-        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("imaging", True)])
+        self.assertEqual([(t.test_type, t.follow_up) for t in patient.tests], [("other imaging", True)])
 
         self.env.run(till=20)
         self.assertEqual(self.metrics.failed_diagnoses[3], 1)
@@ -398,11 +479,11 @@ class PatientWorkflowTests(unittest.TestCase):
         self.assert_departed(patient)
 
     def test_forced_admission_without_hospital_bed_follows_same_rule(self):
-        self.route(follow_ups=("imaging",), diagnosis_fails=True)
+        self.route(follow_ups=("other imaging",), diagnosis_fails=True)
         self.block(self.hospital_beds, 100)
         patient = self.patient()
 
-        # Diagnosis 3-4 fails, follow-up imaging 4-12, diagnosis 12-13 fails (forced).
+        # Diagnosis 3-4 fails, follow-up other imaging 4-12, diagnosis 12-13 fails (forced).
         # Boarding 13-21 times out, extra treatment 21-25, discharge 25-26.
         self.env.run(till=27)
         self.assertTrue(patient.forced_admission)
