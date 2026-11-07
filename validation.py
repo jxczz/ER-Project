@@ -14,6 +14,7 @@ WAITTIME and LOV are comparison targets only; nothing here feeds them into the s
 import argparse
 import math
 import os
+import re
 import statistics
 
 import pandas as pd
@@ -135,10 +136,47 @@ def nhamcs_targets(df):
     return pd.DataFrame(rows, columns=["group", "variable", "n", "mean", *QUANTILES])
 
 
+def nhamcs_admission_targets(df):
+    """
+    PATWT-weighted share of visits with ADMITHOS == 1 ("Admit to this hospital" in the 2022 ED codebook)
+    for each IMMEDR level 1-5 and for "all" (levels 1-5 pooled), plus the unweighted number of records
+    used.
+
+    The base filter is the one in nhamcs_targets (IMMEDR 1-5, PATWT > 0 and finite), and only records
+    with ADMITHOS 0 or 1 are used; any other value is excluded.
+
+    Returns a tidy DataFrame with columns group ("1".."5", "all"), n, share (NaN when n is 0).
+    """
+    df = df.copy()
+    df.columns = df.columns.str.strip().str.lower()
+    immedr = pd.to_numeric(df["immedr"], errors="coerce")
+    weights = pd.to_numeric(df["patwt"], errors="coerce")
+    admithos = pd.to_numeric(df["admithos"], errors="coerce")
+    keep = immedr.isin(LEVELS) & weights.gt(0) & weights.lt(float("inf")) & admithos.isin((0, 1))
+
+    rows = []
+    for group in GROUPS:
+        mask = keep if group == "all" else keep & immedr.eq(int(group))
+        share = float((admithos[mask] * weights[mask]).sum() / weights[mask].sum()) if mask.any() else float("nan")
+        rows.append({"group": group, "n": int(mask.sum()), "share": share})
+    return pd.DataFrame(rows, columns=["group", "n", "share"])
+
+
+def windowed_utilization(resource, start, end):
+    """Time-weighted mean of the resource's claimed quantity over [start, end), divided by its capacity."""
+    return resource.claimed_quantity.slice(start, end).mean() / resource.capacity()
+
+
+def column_safe(name):
+    """Lowercase, with each run of non-alphanumeric characters replaced by an underscore."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower())
+
+
 class TimedESI(ESI):
     """
-    ESI metrics that also store each patient's arrival time, and each door-to-provider and
-    length-of-visit observation's arrival time.
+    ESI metrics that also store each patient's arrival time, each door-to-provider and
+    length-of-visit observation's arrival time, when each stage wait was recorded, and each departed
+    patient's outcome.
     """
 
     def __init__(self, env):
@@ -148,10 +186,22 @@ class TimedESI(ESI):
         # (arrival time, value) pairs per ESI level.
         self.timed_wait_times = {level: [] for level in LEVELS}
         self.timed_lengths_of_visit = {level: [] for level in LEVELS}
+        # (recorded time, ESI level, wait) triples per stage.
+        self.timed_stage_waits = {}
+        # "admitted", "discharged" or "blocked" per departed patient.
+        self.outcomes = {}
 
     def record_arrival(self, patient):
         super().record_arrival(patient)
         self.arrival_times[patient] = self.env.now()
+
+    def record_departure(self, patient):
+        super().record_departure(patient)
+        self.outcomes[patient] = patient.outcome
+
+    def record_stage_wait(self, stage, esi_level, wait_time):
+        super().record_stage_wait(stage, esi_level, wait_time)
+        self.timed_stage_waits.setdefault(stage, []).append((self.env.now(), esi_level, wait_time))
 
     def record_wait_time(self, esi_level, wait_time):
         super().record_wait_time(esi_level, wait_time)
@@ -182,6 +232,19 @@ class TimedESI(ESI):
             }
         return within(self.timed_wait_times), within(self.timed_lengths_of_visit)
 
+    def stage_waits_between(self, start, end):
+        """
+        Stage waits by stage and ESI level that were recorded in [start, end). These are the waits that
+        ended in the window, not the waits of the patients who arrived in it: record_stage_wait does not
+        receive the patient. Every stage recorded so far is included, with empty lists where needed.
+        """
+        return {
+            stage: {
+                level: [wait for at, esi, wait in entries if esi == level and start <= at < end] for level in LEVELS
+            }
+            for stage, entries in self.timed_stage_waits.items()
+        }
+
 
 def _summary(values):
     """Median, mean, 90th percentile (the weighted_quantile rule with equal weights) and n; NaN when empty."""
@@ -205,6 +268,18 @@ def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7)
     `days`), and mean_bed_occupancy (the time-weighted mean of claimed ED beds over the whole run,
     warm-up and run-off included). The last two are the same on every row of a rep. On the "all" row,
     observed_arrivals and unresolved are the sums over ESI. A statistic with n = 0 is NaN.
+
+    Diagnostics (measurement only):
+    - admitted_share and blocked_share: among observed patients who have left the ED, the share whose
+      outcome was "admitted" (got a hospital bed) and "blocked" (to be admitted, but no hospital bed
+      within the boarding cap, so discharged); NaN when there are none.
+    - util_<pool> for each staff pool, beds, each test pool and hospital_beds: the time-weighted mean
+      claimed quantity over the observation window [day `warmup_days`, day `days`) only, divided by the
+      pool's capacity. The same on every row of a rep.
+    - wait_<stage> (stage name made column-safe, e.g. wait_follow_up_lab_queue): the mean queue wait at
+      that stage over the waits recorded in the observation window, i.e. waits that ended in it, not
+      the waits of observed patients (record_stage_wait does not receive the patient). NaN when the
+      group has no such waits, or the stage was never recorded in that rep.
     """
     if n_reps < 1 or days <= 0 or not 0 <= warmup_days < days or not max_runoff_days >= 0:
         raise ValueError(
@@ -243,6 +318,15 @@ def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7)
             unresolved = [patient.esi for patient in metrics.in_window(warmup_end, cutoff)]
             runoff_minutes = env.now() - cutoff
             occupancy = beds.claimed_quantity.mean()
+            pools = {**staff, "beds": beds, **testing, "hospital_beds": hospital_beds}
+            utilization = {
+                f"util_{name}": windowed_utilization(pool, warmup_end, cutoff) for name, pool in pools.items()
+            }
+            stage_waits = metrics.stage_waits_between(warmup_end, cutoff)
+            outcomes = [
+                (patient.esi, metrics.outcomes[patient])
+                for patient in metrics.arrived_between(metrics.outcomes, warmup_end, cutoff)
+            ]
             for group in GROUPS:
                 levels = LEVELS if group == "all" else (int(group),)
                 row = {"rep": i + 1, "seed": seed, "group": group}
@@ -255,6 +339,17 @@ def run_replications(n_reps, days, warmup_days, first_seed=1, max_runoff_days=7)
                     "runoff_minutes": runoff_minutes,
                     "mean_bed_occupancy": occupancy,
                 })
+                group_outcomes = [outcome for level, outcome in outcomes if level in levels]
+                for outcome in ("admitted", "blocked"):
+                    row[f"{outcome}_share"] = (
+                        group_outcomes.count(outcome) / len(group_outcomes) if group_outcomes else float("nan")
+                    )
+                row.update(utilization)
+                for stage, by_level in stage_waits.items():
+                    waits_in_group = [wait for level in levels for wait in by_level[level]]
+                    row[f"wait_{column_safe(stage)}"] = (
+                        statistics.fmean(waits_in_group) if waits_in_group else float("nan")
+                    )
                 rows.append(row)
     finally:
         config.ANIMATE = previous_animate
@@ -313,7 +408,9 @@ def main():
     ):
         parser.error(f"--save-csv: {args.save_csv} is a directory or its directory does not exist")
 
-    targets = nhamcs_targets(pd.read_parquet(ERDataReader(config.DATASET_PATH).filepath))
+    nhamcs = pd.read_parquet(ERDataReader(config.DATASET_PATH).filepath)
+    targets = nhamcs_targets(nhamcs)
+    admission_targets = nhamcs_admission_targets(nhamcs).set_index("group")
     replications = run_replications(
         args.reps, args.days, args.warmup_days, args.first_seed, max_runoff_days=args.max_runoff_days
     )
@@ -355,7 +452,46 @@ def main():
         print(view.to_string())
         print()
 
+    # Diagnostics: where the time goes, and the admitted share. Shares and utilization in percent.
+    by_group = replications.groupby("group")
+    view = pd.DataFrame(index=pd.Index([group.capitalize() for group in GROUPS], name=table.index.name))
+    admitted = [mean_ci(by_group.get_group(group)["admitted_share"] * 100) for group in GROUPS]
+    view["sim admitted %"] = [round(ci[0], 1) for ci in admitted]
+    view["sim admitted 95% CI"] = [_format_ci(low, high) for _, low, high in admitted]
+    view["sim blocked %"] = [round(mean_ci(by_group.get_group(group)["blocked_share"] * 100)[0], 1) for group in GROUPS]
+    view["NHAMCS ADMITHOS %"] = (admission_targets.loc[list(GROUPS), "share"] * 100).round(1).to_numpy()
+    view["NHAMCS n"] = admission_targets.loc[list(GROUPS), "n"].to_numpy()
+    print("Admitted share (sim) vs ADMITHOS (NHAMCS)")
+    print(view.to_string())
+    print(
+        "sim admitted = got a hospital bed; sim blocked = to be admitted but no hospital bed within the "
+        "boarding cap, so discharged (not counted as admitted).\n"
+    )
+
     by_rep = replications.groupby("rep")
+    util_columns = [column for column in replications.columns if column.startswith("util_")]
+    utilization = [mean_ci(by_rep[column].first() * 100) for column in util_columns]
+    view = pd.DataFrame(index=pd.Index([column.removeprefix("util_") for column in util_columns], name="Pool"))
+    view["mean %"] = [round(ci[0], 1) for ci in utilization]
+    view["95% CI"] = [_format_ci(low, high) for _, low, high in utilization]
+    print(
+        f"Resource utilization (claimed / capacity, time-weighted) between day {args.warmup_days:g} and day "
+        f"{args.days:g}"
+    )
+    print(view.to_string())
+    print()
+
+    wait_columns = [column for column in replications.columns if column.startswith("wait_")]
+    view = by_group[wait_columns].mean().loc[list(GROUPS)].T.round(1)
+    view.index = pd.Index([column.removeprefix("wait_") for column in wait_columns], name="Stage")
+    view.columns = [group.capitalize() for group in GROUPS]
+    print(
+        f"Mean queue wait by stage (min), waits recorded between day {args.warmup_days:g} and day "
+        f"{args.days:g} (not only observed patients), mean across replications"
+    )
+    print(view.to_string())
+    print()
+
     runoff = by_rep["runoff_minutes"].first()
     print(f"Run-off past day {args.days:g}: mean {runoff.mean():.1f} min, max {runoff.max():.1f} min")
     unresolved = int(replications["unresolved"].sum())

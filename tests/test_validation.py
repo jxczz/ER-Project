@@ -13,7 +13,11 @@ import salabim as sim
 
 import config
 import validation
-from validation import TimedESI, mean_ci, nhamcs_targets, run_replications, weighted_quantile
+from simulation.esi import ESI
+from validation import (
+    TimedESI, column_safe, mean_ci, nhamcs_admission_targets, nhamcs_targets, run_replications, weighted_quantile,
+    windowed_utilization,
+)
 
 
 class WeightedQuantileTests(unittest.TestCase):
@@ -146,12 +150,51 @@ class NhamcsTargetsTests(unittest.TestCase):
         self.assertEqual(list(self.df.columns), ["IMMEDR", "WAITTIME", "LOV", "PATWT"])
 
 
+class NhamcsAdmissionTargetsTests(unittest.TestCase):
+    def setUp(self):
+        self.df = pd.DataFrame(
+            [
+                # IMMEDR, ADMITHOS, PATWT
+                (2, 1, 1),
+                (2, 0, 3),
+                (2, 1, 0),           # PATWT 0
+                (2, 1, -5),          # PATWT negative
+                (2, 1, math.inf),    # PATWT not finite
+                (2, 2, 1000),        # ADMITHOS not 0/1
+                (2, -9, 1000),
+                (7, 1, 1000),        # IMMEDR outside 1-5
+                (0, 1, 1000),
+                (-8, 1, 1000),
+                (4, 1, 2),
+            ],
+            columns=["IMMEDR", "ADMITHOS", "PATWT"],
+        )
+
+    def test_weighted_share_with_exclusions(self):
+        targets = nhamcs_admission_targets(self.df).set_index("group")
+        self.assertEqual(list(targets.index), ["1", "2", "3", "4", "5", "all"])
+        # IMMEDR 2: admitted weight 1 of 1 + 3.
+        self.assertEqual(targets.loc["2", "n"], 2)
+        self.assertAlmostEqual(targets.loc["2", "share"], 0.25)
+        self.assertEqual(targets.loc["4", "n"], 1)
+        self.assertAlmostEqual(targets.loc["4", "share"], 1.0)
+        self.assertEqual(targets.loc["1", "n"], 0)
+        self.assertTrue(math.isnan(targets.loc["1", "share"]))
+
+    def test_all_group_pools_only_immedr_1_to_5(self):
+        overall = nhamcs_admission_targets(self.df).set_index("group").loc["all"]
+        # Admitted weights 1 (IMMEDR 2) + 2 (IMMEDR 4) of 1 + 3 + 2; the IMMEDR 7, 0 and -8 records are left out.
+        self.assertEqual(overall["n"], 3)
+        self.assertAlmostEqual(overall["share"], 0.5)
+
+
 class StandInPatient:
     def __init__(self, esi):
         self.esi = esi
         self.ambulance = False
         self.door_to_provider = None
         self.length_of_visit = None
+        self.outcome = None
 
 
 class ObservationWindowTests(unittest.TestCase):
@@ -197,6 +240,60 @@ class ObservationWindowTests(unittest.TestCase):
         self.assertEqual(metrics.wait_times[3], [180, 130, 30])
         self.assertEqual(metrics.lengths_of_visit[3], [250, 200])
         self.assertEqual(metrics.arrivals[3], 3)
+
+    def test_stage_waits_are_kept_by_when_they_were_recorded(self):
+        env = sim.Environment(trace=False)
+        metrics = TimedESI(env)
+        # The window is [80, 200).
+        env.run(till=50)
+        metrics.record_stage_wait("follow-up lab queue", 3, 40)  # recorded before the window
+        env.run(till=80)
+        metrics.record_stage_wait("follow-up lab queue", 3, 10)
+        metrics.record_stage_wait("bed", 2, 5)
+        env.run(till=200)
+        metrics.record_stage_wait("follow-up lab queue", 3, 70)  # recorded at the window end: left out
+        waits = metrics.stage_waits_between(80, 200)
+        self.assertEqual(waits["follow-up lab queue"], {1: [], 2: [], 3: [10], 4: [], 5: []})
+        self.assertEqual(waits["bed"][2], [5])
+        self.assertEqual(metrics.stage_waits["follow-up lab queue"][3], [40, 10, 70])  # the parent keeps all
+        self.assertEqual(column_safe("follow-up lab queue"), "follow_up_lab_queue")
+
+    def test_departure_keeps_outcome(self):
+        env = sim.Environment(trace=False)
+        metrics = TimedESI(env)
+        patient = StandInPatient(2)
+        metrics.record_arrival(patient)
+        patient.outcome = "blocked"
+        metrics.record_departure(patient)
+        self.assertEqual(metrics.outcomes, {patient: "blocked"})
+        self.assertEqual(metrics.in_ed, set())
+
+
+class WindowedUtilizationTests(unittest.TestCase):
+    def setUp(self):
+        previous_yieldless = sim.yieldless()
+        sim.yieldless(False)
+        self.addCleanup(sim.yieldless, previous_yieldless)
+
+    def test_time_weighted_and_restricted_to_the_window(self):
+        env = sim.Environment(trace=False)
+        resource = sim.Resource("pool", capacity=2)
+
+        class Claimer(sim.Component):
+            def process(self):
+                yield self.hold(50)
+                yield self.request(resource)  # one of the two units is claimed during [50, 150)
+                yield self.hold(100)
+                self.release(resource)
+
+        Claimer()
+        env.run(till=300)
+        # [100, 200): one unit claimed for 50 of 100 minutes, so 0.5 of 2 units.
+        self.assertAlmostEqual(windowed_utilization(resource, 100, 200), 0.25)
+        # [0, 300): claimed for 100 of 300 minutes.
+        self.assertAlmostEqual(windowed_utilization(resource, 0, 300), 1 / 6)
+        # [150, 300): never claimed.
+        self.assertAlmostEqual(windowed_utilization(resource, 150, 300), 0)
 
 
 class RunReplicationsSmokeTest(unittest.TestCase):
@@ -249,6 +346,30 @@ class RunReplicationsSmokeTest(unittest.TestCase):
                 self.assertEqual(row.unresolved, 0)
                 self.assertGreaterEqual(row.runoff_minutes, 0)
 
+    def test_diagnostics_are_in_range_and_do_not_change_outcomes(self):
+        results = run_replications(2, days=2, warmup_days=1)
+        util_columns = [f"util_{name}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
+        for column in (*util_columns, "admitted_share", "blocked_share"):
+            with self.subTest(column=column):
+                self.assertTrue(results[column].dropna().between(0, 1).all())
+        # Utilization is a property of the replication, so it is the same on each of its rows.
+        for column in util_columns:
+            self.assertTrue((results.groupby("rep")[column].nunique() == 1).all())
+        self.assertTrue(results.loc[results["group"] == "all", "admitted_share"].notna().all())
+        wait_columns = [column for column in results.columns if column.startswith("wait_")]
+        for column in ("wait_triage", "wait_bed", "wait_exam"):
+            self.assertIn(column, wait_columns)
+        self.assertTrue(results[wait_columns].stack().dropna().ge(0).all())
+
+        # With the new recording switched off, door-to-provider and length of visit are unchanged.
+        with patch.object(TimedESI, "record_stage_wait", ESI.record_stage_wait), \
+                patch.object(TimedESI, "record_departure", ESI.record_departure), \
+                patch.object(validation, "windowed_utilization", return_value=math.nan):
+            plain = run_replications(2, days=2, warmup_days=1)
+        self.assertFalse(any(column.startswith("wait_") for column in plain.columns))
+        outcome_columns = [column for column in results.columns if column.startswith(("d2p_", "lov_"))]
+        pd.testing.assert_frame_equal(results[outcome_columns], plain[outcome_columns])
+
 
 class SaveCsvTest(unittest.TestCase):
     def setUp(self):
@@ -267,13 +388,20 @@ class SaveCsvTest(unittest.TestCase):
             self.assertTrue(os.path.exists(path))
             self.assertIn(path, output.getvalue())
             saved = pd.read_csv(path, dtype={"group": str})
-            self.assertEqual(list(saved.columns), [
+            util_columns = [f"util_{name}" for name in (*config.STAFF, "beds", *config.TEST_TYPES, "hospital_beds")]
+            fixed = [
                 "rep", "seed", "group",
                 "d2p_median", "d2p_mean", "d2p_p90", "d2p_n",
                 "lov_median", "lov_mean", "lov_p90", "lov_n",
                 "observed_arrivals", "unresolved", "runoff_minutes", "mean_bed_occupancy",
-                "days", "warmup_days", "max_runoff_days",
-            ])
+                "admitted_share", "blocked_share", *util_columns,
+            ]
+            columns = list(saved.columns)
+            self.assertEqual(columns[:len(fixed)], fixed)
+            self.assertEqual(columns[-3:], ["days", "warmup_days", "max_runoff_days"])
+            wait_columns = columns[len(fixed):-3]
+            self.assertIn("wait_exam", wait_columns)
+            self.assertTrue(all(column.startswith("wait_") for column in wait_columns))
             self.assertEqual(len(saved), 12)
             self.assertEqual(
                 saved[["days", "warmup_days", "max_runoff_days"]].drop_duplicates().values.tolist(), [[2, 1, 7]]
