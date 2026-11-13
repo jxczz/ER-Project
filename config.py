@@ -17,8 +17,10 @@ MEAN_ARRIVAL_TIME = 16  # ~90 arrivals/day, matching the NHAMCS average volume
 # (Int Emerg Nurs, PMID 26796287).
 TRIAGE_TIME_MEDIAN = 2.58
 TRIAGE_TIME_IQR = (1.36, 4.35)
-MEAN_EXAM_TIME = 15
-MEAN_DIAGNOSIS_TIME = 10
+MEAN_EXAM_TIMES = {1:38,2:38,3:24,4:13.5,5:9}
+EXAM_TIMES_SD = {1:21,2:21,3:13.5,4:7.5,5:5.5}
+MEAN_DIAGNOSIS_TIMES = {1:38,2:38,3:24,4:13.5,5:9}
+DIAGNOSIS_TIMES_SD = {1:21,2:21,3:13.5,4:7.5,5:5.5}
 
 # Diagnostic testing. Each test type has its own pool (e.g. lab techs, scanners). Initial tests are
 # ordered after examination from INITIAL_TEST_WEIGHTS below. The patient keeps their bed while tests run.

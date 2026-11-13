@@ -14,6 +14,11 @@ def lognormal_params_from_median_iqr(median, q1, q3):
         raise ValueError(f"need finite 0 < q1 < median < q3, got q1={q1}, median={median}, q3={q3}")
     return math.log(median), (math.log(q3) - math.log(q1)) / (2 * Z75)
 
+def get_lognormal_params_from_mean_sd(mean,sd):
+    #Similar to above functions, but use mean and standard deviation
+    # Calculate sigma^2 (log-variance)
+    sigma_sq = math.log(1 + (sd**2 / (mean**2)))
+    return math.log(mean) - (sigma_sq / 2), math.sqrt(sigma_sq)
 
 INITIAL_TEST_COMBINATIONS = {
     "none": [],
@@ -206,7 +211,8 @@ class Patient(sim.Component):
         # Door-to-provider time.
         self.door_to_provider = self.env.now() - arrival_time
         self.metrics.record_wait_time(self.esi, self.door_to_provider)
-        yield self.hold(random.expovariate(1.0 / cfg.MEAN_EXAM_TIME))
+        mu, sigma = get_lognormal_params_from_mean_sd(cfg.MEAN_EXAM_TIMES[self.esi], cfg.EXAM_TIMES_SD[self.esi])
+        yield self.hold(random.lognormvariate(mu, sigma))
         self.release(self.staff["exam"])
 
         # TESTING AND DIAGNOSIS. Initial tests are ordered as the exam finishes. A failed diagnosis
@@ -226,7 +232,8 @@ class Patient(sim.Component):
             # DIAGNOSIS (diagnosing provider). Requires the bed and all test results.
             yield from self._acquire("diagnosis", self.env.q_wait_diagnosis, self.staff["diagnosis"], self.esi)
             yield from self._enter_stage(self.env.q_in_diagnosis)
-            yield self.hold(random.expovariate(1.0 / cfg.MEAN_DIAGNOSIS_TIME))
+            mu, sigma = get_lognormal_params_from_mean_sd(cfg.MEAN_DIAGNOSIS_TIMES[self.esi], cfg.DIAGNOSIS_TIMES_SD[self.esi])
+            yield self.hold(random.lognormvariate(mu, sigma))
             self.release(self.staff["diagnosis"])
             self.diagnosis_attempts += 1
 
