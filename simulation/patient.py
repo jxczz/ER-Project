@@ -178,7 +178,7 @@ class Patient(sim.Component):
             DiagnosticTest(
                 patient=self,
                 test_type=test_type,
-                resource=self.testing[test_type],
+                resource=self.testing.get(test_type),
                 follow_up=follow_up,
                 env=self.env,
             )

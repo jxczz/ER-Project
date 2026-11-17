@@ -22,14 +22,22 @@ EXAM_TIMES_SD = {1:21,2:21,3:13.5,4:7.5,5:5.5}
 MEAN_DIAGNOSIS_TIMES = {1:38,2:38,3:24,4:13.5,5:9}
 DIAGNOSIS_TIMES_SD = {1:21,2:21,3:13.5,4:7.5,5:5.5}
 
-# Diagnostic testing. Each test type has its own pool (e.g. lab techs, scanners). Initial tests are
+# Diagnostic testing. Each test type except lab has its own pool (e.g. scanners). Initial tests are
 # ordered after examination from INITIAL_TEST_WEIGHTS below. The patient keeps their bed while tests run.
 # A type either holds its pool for an exponential time with mean "mean_time", or (CT) holds it for a
-# lognormal room time and then waits a lognormal report delay that holds no pool.
+# lognormal room time and then waits a lognormal report delay that holds no pool, or (lab) has no pool
+# and waits a lognormal order-to-result turnaround time.
 TEST_TYPES = {
     "lab": {
-        "capacity": 3,
-        "mean_time": 45,
+        # Order-to-result turnaround (holds no pool; starts as soon as it is ordered), ED order to last
+        # result of a standard 14-test blood panel, including venipuncture, tube transport and central-lab
+        # processing: median 51.1 min, IQR 41.1-65.0 (Vrijsen BEL et al., "Shorter laboratory turnaround
+        # time is associated with shorter emergency department length of stay", BMC Emerg Med
+        # 2022;22:207, doi:10.1186/s12873-022-00763-w; one academic ED, Utrecht, n=23,718 visits
+        # 2017-2019). No pool because the measured time already includes queueing in the real lab.
+        # Overall figure for all acuities and times of day.
+        "turnaround_median": 51.1,
+        "turnaround_iqr": (41.1, 65.0),
         "follow_up_probability": {1: 0.5, 2: 0.5, 3: 0.4, 4: 0.3, 5: 0.3},
     },
     # CT scanner. One scanner: the ED of Stenson et al. 2021 (~53k visits/yr) ran on one dedicated ED

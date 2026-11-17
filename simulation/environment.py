@@ -36,10 +36,11 @@ def create_environment(random_seed=None):
         for stage, capacity in STAFF.items()
     }
     beds = sim.Resource("beds", capacity = NUM_BEDS) # creating resource for beds, capacity based on config.py
-    # One pool per test type, e.g. {"lab": Resource, "ct": Resource, "other imaging": Resource}.
+    # One pool per test type that has a capacity, e.g. {"ct": Resource, "other imaging": Resource}.
     testing = {
         name: sim.Resource(name, capacity = spec["capacity"])
         for name, spec in TEST_TYPES.items()
+        if "capacity" in spec
     }
 
     # Main-hospital beds, shared with the hospital's own (non-ED) patients.

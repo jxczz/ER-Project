@@ -14,7 +14,8 @@ class DiagnosticTest(sim.Component):
 
     A test type's spec gives either "mean_time" (an exponential hold of the pool) or lognormal
     "room_time" and "report_delay" medians and IQRs: the pool is held for the room time, then the
-    result is ready after the report delay, which holds no resource.
+    result is ready after the report delay, which holds no resource. A spec with a lognormal
+    "turnaround" median and IQR (lab) has no pool: the result is ready after that time from ordering.
     """
 
     def setup(self, patient, test_type, resource, follow_up=False):
@@ -25,12 +26,21 @@ class DiagnosticTest(sim.Component):
         self.done = sim.State(f"{test_type}_done", value=False, env=self.env)
 
     def process(self):
+        spec = cfg.TEST_TYPES[self.test_type]
+        if "turnaround_median" in spec:
+            # Imported here: simulation.patient imports this module.
+            from simulation.patient import lognormal_params_from_median_iqr
+
+            # No pool and no queue wait: the measured turnaround already includes queueing in the lab.
+            yield self.hold(random.lognormvariate(*lognormal_params_from_median_iqr(
+                spec["turnaround_median"], *spec["turnaround_iqr"])))
+            self.done.set(True)
+            return
         requested_at = self.env.now()
         # Sicker patients' tests are run first.
         yield self.request(self.resource, request_priority=self.patient.esi)
         stage = f"{'follow-up ' if self.follow_up else ''}{self.test_type} queue"
         self.patient.metrics.record_stage_wait(stage, self.patient.esi, self.env.now() - requested_at)
-        spec = cfg.TEST_TYPES[self.test_type]
         if "mean_time" in spec:
             yield self.hold(random.expovariate(1.0 / spec["mean_time"]))
             self.release(self.resource)

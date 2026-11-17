@@ -1,6 +1,7 @@
 import math
 import random
 import unittest
+from types import SimpleNamespace
 from unittest.mock import call, patch
 
 import salabim as sim
@@ -9,6 +10,7 @@ import config as cfg
 import simulation.environment as environment
 from simulation.arrival_generator import ArrivalGenerator
 from simulation.data_reader import ERDataReader
+from simulation.diagnostic_test import DiagnosticTest
 from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
 from simulation.patient import (
@@ -601,6 +603,51 @@ class PatientWorkflowTests(unittest.TestCase):
             self.patient(esi=None)
         self.assertEqual(acuity.call_args_list[0].kwargs["weights"], cfg.ESI_WEIGHTS_AMBULANCE_SYNTHETIC)
         self.assertEqual(acuity.call_args_list[1].kwargs["weights"], cfg.ESI_WEIGHTS_SYNTHETIC)
+
+
+class LabTurnaroundTests(unittest.TestCase):
+    """Lab, with the real config: a measured order-to-result turnaround that holds no pool."""
+
+    def setUp(self):
+        previous_yieldless = sim.yieldless()
+        sim.yieldless(False)
+        self.addCleanup(sim.yieldless, previous_yieldless)
+
+    def test_config_lab_spec_matches_vrijsen_2022(self):
+        lab = cfg.TEST_TYPES["lab"]
+        self.assertEqual(lab["turnaround_median"], 51.1)
+        self.assertEqual(lab["turnaround_iqr"], (41.1, 65.0))
+        self.assertNotIn("capacity", lab)
+        self.assertNotIn("mean_time", lab)
+
+    def test_environment_builds_no_lab_pool(self):
+        _env, _staff, _beds, testing, _hospital_beds = environment.create_environment()
+        self.assertEqual(set(testing), {"ct", "other imaging"})
+        for name in ("ct", "other imaging"):
+            self.assertEqual(testing[name].capacity(), cfg.TEST_TYPES[name]["capacity"])
+
+    def test_lab_result_is_ready_after_drawn_turnaround_without_pool_or_queue_wait(self):
+        env, _staff, _beds, testing, _hospital_beds = environment.create_environment()
+        metrics = ESI()
+        patient = SimpleNamespace(esi=3, metrics=metrics)
+        with patch("simulation.diagnostic_test.random.lognormvariate", return_value=5.0) as draw:
+            labs = [
+                DiagnosticTest(patient=patient, test_type="lab", resource=testing.get("lab"), follow_up=follow_up, env=env)
+                for follow_up in (False, True)
+            ]
+            env.run(till=4.9)
+            self.assertFalse(any(lab.done() for lab in labs))
+            for pool in testing.values():
+                self.assertEqual(pool.claimed_quantity(), 0)
+                self.assertEqual(len(pool.requesters()), 0)
+            env.run(till=5.1)
+            self.assertTrue(all(lab.done() for lab in labs))
+
+        params = lognormal_params_from_median_iqr(51.1, 41.1, 65.0)
+        self.assertEqual(draw.call_args_list, [call(*params), call(*params)])
+        self.assertTrue(all(lab.resource is None for lab in labs))
+        self.assertNotIn("lab queue", metrics.stage_waits)
+        self.assertNotIn("follow-up lab queue", metrics.stage_waits)
 
 
 class PatientAccountingTests(unittest.TestCase):
