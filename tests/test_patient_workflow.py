@@ -11,16 +11,21 @@ from simulation.arrival_generator import ArrivalGenerator
 from simulation.data_reader import ERDataReader
 from simulation.esi import ESI
 from simulation.hospital import HospitalCensus, InpatientStay, next_discharge_time
-from simulation.patient import INITIAL_TEST_COMBINATIONS, Patient, lognormal_params_from_median_iqr
+from simulation.patient import (
+    INITIAL_TEST_COMBINATIONS, Patient, get_lognormal_params_from_mean_sd, lognormal_params_from_median_iqr,
+)
 
 # Deterministic durations: random.expovariate(1 / mean) is patched to return the mean exactly, and
-# random.lognormvariate (triage, CT room time and report delay) to return the median.
+# random.lognormvariate (triage, CT room time and report delay) to return the median. Exam and
+# diagnosis have sd 0, so their lognormal median is the mean.
 # Powers of two keep the timeline arithmetic exact.
 MEANS = dict(
     TRIAGE_TIME_MEDIAN=1,
     TRIAGE_TIME_IQR=(0.5, 2),
-    MEAN_EXAM_TIME=2,
-    MEAN_DIAGNOSIS_TIME=1,
+    MEAN_EXAM_TIMES={level: 2 for level in range(1, 6)},
+    EXAM_TIMES_SD={level: 0 for level in range(1, 6)},
+    MEAN_DIAGNOSIS_TIMES={level: 1 for level in range(1, 6)},
+    DIAGNOSIS_TIMES_SD={level: 0 for level in range(1, 6)},
     MEAN_TREATMENT_TIME={level: 2 for level in range(1, 6)},
     MEAN_EXTENDED_TREATMENT_TIME={level: 4 for level in range(1, 6)},
     MEAN_HOSPITAL_STAY=64,
@@ -249,8 +254,9 @@ class PatientWorkflowTests(unittest.TestCase):
 
     def test_ct_room_time_and_report_delay_are_drawn_from_configured_lognormals(self):
         self.route(tests=("ct",))
-        with patch("simulation.diagnostic_test.random.lognormvariate", side_effect=[3.0, 5.0]) as draw:
-            patient = self.patient(ambulance=True)  # no triage, so only CT draws lognormals
+        # Draws in order: exam 2, CT room 3, CT report 5, diagnosis 1.
+        with patch("simulation.diagnostic_test.random.lognormvariate", side_effect=[2.0, 3.0, 5.0, 1.0]) as draw:
+            patient = self.patient(ambulance=True)  # no triage, so only exam, CT and diagnosis draw lognormals
             # Exam 0-2, scanner 2-5, report 5-10.
             self.env.run(till=4.9)
             self.assertIn(patient.tests[0], self.testing["ct"].claimers())
@@ -260,8 +266,10 @@ class PatientWorkflowTests(unittest.TestCase):
 
         spec = self.test_types["ct"]
         self.assertEqual(draw.call_args_list, [
+            call(*get_lognormal_params_from_mean_sd(MEANS["MEAN_EXAM_TIMES"][3], 0)),
             call(*lognormal_params_from_median_iqr(spec["room_time_median"], *spec["room_time_iqr"])),
             call(*lognormal_params_from_median_iqr(spec["report_delay_median"], *spec["report_delay_iqr"])),
+            call(*get_lognormal_params_from_mean_sd(MEANS["MEAN_DIAGNOSIS_TIMES"][3], 0)),
         ])
         self.assertEqual(self.metrics.stage_waits["test results"][3], [8.0])
         self.assert_departed(patient)
@@ -270,10 +278,15 @@ class PatientWorkflowTests(unittest.TestCase):
         self.route(tests=("other imaging",))
         with patch("simulation.diagnostic_test.random.lognormvariate") as lognormal, \
                 patch("simulation.diagnostic_test.random.expovariate", side_effect=lambda rate: 1 / rate) as exponential:
-            patient = self.patient(ambulance=True)  # no triage, so no lognormal draw at all
+            patient = self.patient(ambulance=True)  # no triage, so only exam and diagnosis draw lognormals
             self.env.run(till=20)
 
-        lognormal.assert_not_called()
+        # None of the lognormal draws came from other imaging.
+        exam_and_diagnosis = [
+            call(*get_lognormal_params_from_mean_sd(MEANS["MEAN_EXAM_TIMES"][3], 0)),
+            call(*get_lognormal_params_from_mean_sd(MEANS["MEAN_DIAGNOSIS_TIMES"][3], 0)),
+        ]
+        self.assertTrue(all(draw in exam_and_diagnosis for draw in lognormal.call_args_list), lognormal.call_args_list)
         self.assertIn(call(1.0 / OTHER_IMAGING_TIME), exponential.call_args_list)
         self.assertEqual(self.metrics.stage_waits["test results"][3], [OTHER_IMAGING_TIME])
         self.assertIn("other imaging queue", self.metrics.stage_waits)

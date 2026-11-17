@@ -2,7 +2,7 @@ import math
 import random
 import statistics
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import salabim as sim
 
@@ -80,9 +80,11 @@ class TriageHoldTests(unittest.TestCase):
             )
             self.env.run(till=duration - 0.01)
             self.assertIn(patient, self.staff["triage"].claimers())
+            # Only triage has drawn so far; the exam draws its own lognormal once triage ends.
+            draw.assert_called_once_with(*expected)
             self.env.run(till=duration + 0.01)
 
-        draw.assert_called_once_with(*expected)
+        self.assertEqual(draw.call_args_list[0], call(*expected))
         self.assertNotIn(patient, self.staff["triage"].claimers())
         # With no queues, the exam (door-to-provider) starts the moment triage ends.
         self.assertEqual(metrics.wait_times[3], [duration])
